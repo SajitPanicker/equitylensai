@@ -1,0 +1,20 @@
+# Install this file with: pip install -r requirements.txt
+# Install the web interface and OpenAI API client first.
+streamlit
+openai
+python-dotenv
+
+# Local sentence-transformer embeddings; this also installs its model dependencies.
+sentence-transformers
+
+# Persistent local vector storage.
+chromadb
+
+# PDF and PowerPoint presentation text extraction.
+pypdf
+python-pptx
+
+# Draw verified financial text over generated infographic backgrounds.
+pillow
+
+# python -m streamlit run stock_rag_chatbot.py --server.fileWatcherType none
