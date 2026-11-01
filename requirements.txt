@@ -14,6 +14,9 @@ chromadb
 pypdf
 python-pptx
 
+# Recursive paragraph/sentence/word-aware text chunking.
+langchain-text-splitters
+
 # Draw verified financial text over generated infographic backgrounds.
 pillow
 

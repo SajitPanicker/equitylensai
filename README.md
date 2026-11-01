@@ -85,7 +85,7 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-`requirements.txt` lists the direct third-party packages used by this project. pip resolves and installs their transitive dependencies automatically. The sentence-transformers installation includes the PyTorch and model-loading dependencies it needs; the first embedding-model load downloads model files and can take a few minutes. Pillow is included for compositing exact, verified source quotations over generated image backgrounds. LangChain is not currently used by this existing app; its RAG flow directly uses ChromaDB and the OpenAI SDK.
+`requirements.txt` lists the direct third-party packages used by this project. pip resolves and installs their transitive dependencies automatically. The sentence-transformers installation includes the PyTorch and model-loading dependencies it needs; the first embedding-model load downloads model files and can take a few minutes. Pillow is included for compositing exact, verified source quotations over generated image backgrounds. `langchain-text-splitters` provides the recursive splitter only; retrieval and generation continue to use ChromaDB and the OpenAI SDK directly.
 
 ### 6. Start the Streamlit server
 
@@ -99,12 +99,15 @@ This command starts Streamlit's Uvicorn server and opens the local app in your b
 
 ## RAG pipeline
 
-1. The app reads `.pdf` and `.pptx` files directly inside `DOCUMENTS_FOLDER`. PDFs are extracted page by page; PowerPoint files are extracted slide by slide, including table text.
-2. Extracted text is divided into overlapping chunks. `CHUNK_SIZE` and `CHUNK_OVERLAP` are character counts and can be adjusted in `.env`.
-3. The app embeds each chunk with Hugging Face `sentence-transformers/all-mpnet-base-v2`. The app checks that the model returns **768-dimensional vectors**. Question vectors are generated with that same model and normalization setting.
-4. ChromaDB stores the text, vectors, and source filename, page/slide, and chunk metadata under `CHROMA_DB_PATH`. The database persists between app runs.
-5. When indexing again, file content hashes identify unchanged and modified presentations. Updated chunks replace older chunks, and chunks for files removed from the folder are deleted. A changed file that cannot be read has its outdated chunks removed rather than continuing to appear current.
-6. For each question, ChromaDB returns the `TOP_K` semantically similar excerpts. The OpenAI API receives those excerpts and the question; it is instructed to use the evidence, distinguish historical results from guidance, and admit when evidence is missing.
+1. The app reads `.pdf` and `.pptx` files directly inside `DOCUMENTS_FOLDER`. PDFs are extracted page by page; PowerPoint files are extracted slide by slide, including table text. Empty pages and slides are skipped.
+2. Before indexing, review each file's metadata in **Review document metadata**. A standardized filename can prefill the form: `Company__Ticker__FY2026__Q1__Investor_Presentation.pdf`. If a filename does not match that format, enter company, ticker, financial year, quarter, and document type yourself. The app does not guess missing values.
+3. Each page or slide is split independently with `RecursiveCharacterTextSplitter`. It prefers paragraph breaks, then line and sentence boundaries, then word and character boundaries. `CHUNK_SIZE` (default `1000`) and `CHUNK_OVERLAP` (default `150`) are character counts set in `.env`; every chunk keeps its original page or slide label.
+4. The app embeds each chunk with Hugging Face `sentence-transformers/all-mpnet-base-v2`. The app checks that the model returns **768-dimensional vectors**. Question vectors are generated with that same model and normalization setting.
+5. One persistent ChromaDB collection stores every company's chunks. Each chunk has `company`, `ticker`, `fiscal_year`, `quarter`, `document_type`, `source`, `source_path`, `file_hash`, `chunk_number`, and `location`, alongside its text and vector.
+6. ChromaDB applies metadata `where` filters before semantic ranking. Selected company, year, and quarter fields combine with AND; multiple values use Chroma's `$in` operator. The retrieval function also accepts explicit `where_document` text-contains filters. With no selected or recognized filters, it searches across all indexed companies and years.
+7. Multi-year questions are retrieved separately for each requested financial year and then combined with year labels intact. The answer instructions require the model to keep each period separate. A missing company/year/quarter match is reported instead of widening the search.
+8. File path and content hashes form unique chunk IDs. Re-indexing uses `upsert`, so repeated runs do not duplicate chunks; changed content receives new IDs and old chunks are removed only after replacement succeeds. Metadata-only edits update the same IDs. **Rebuild selected folder index** safely re-reads that folder without deleting the database or another folder's records. Existing databases remain readable; re-index files after reviewing metadata to migrate old records in place.
+9. ChromaDB returns the `TOP_K` semantically similar excerpts within the requested filter. OpenAI receives company, ticker, year, quarter, filename, and page/slide labels and is instructed not to mix values across periods.
 
 ## Image generation
 
@@ -152,8 +155,14 @@ Scanned PDFs that contain page images but no selectable text are not OCR'd by th
 | `IMAGE_SIZE` | Supported output size; defaults to portrait `1024x1536` |
 | `IMAGE_QUALITY` | Image quality (`low`, `medium`, `high`, `xhigh`, `max`, or `auto`) |
 | `TOP_K` | Maximum number of matching chunks sent with a question |
-| `CHUNK_SIZE` | Maximum target chunk length, in characters |
-| `CHUNK_OVERLAP` | Repeated characters between adjacent chunks |
+| `CHUNK_SIZE` | Recursive splitter target length in characters; defaults to `1000` |
+| `CHUNK_OVERLAP` | Repeated characters between adjacent chunks; defaults to `150` and must be smaller than `CHUNK_SIZE` |
+
+## Metadata and filtering
+
+The recommended filename is `Company__Ticker__FY2026__Q1__Investor_Presentation.pdf` (or `.pptx`). Use double underscores between the five fields. The financial year uses `FY2026`; quarter can be `Q1` through `Q4`, `FY`, or `Annual`. Filename extraction only prefills the review form; save checked metadata for every file before indexing. Other filename patterns require manual entry.
+
+The sidebar lists indexed companies, the financial years for the selected company, and available quarters. Leaving a control at “All” does not apply that filter. You can select multiple years for comparison or mention known company names/tickers and `FY####` periods in a question. Source labels include company, ticker, year, quarter, filename, and page/slide. Old chunks without the new fields remain stored until their source files are re-indexed with reviewed metadata; migration never clears the database automatically.
 
 ## Troubleshooting
 
