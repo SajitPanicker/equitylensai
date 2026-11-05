@@ -85,6 +85,23 @@ class MetadataIndexingTests(unittest.TestCase):
         self.collection = MemoryCollection()
         self.model = object()
 
+    def test_company_name_filter_accepts_exact_exchange_identifier(self):
+        record = chatbot.FilingRecord(
+            exchange="NSE",
+            company="Tata Consultancy Services Limited",
+            ticker="TCS",
+            title="Quarterly results",
+            original_category="Financial Results",
+            publication_date="2026-10-10",
+            source_url="https://nsearchives.nseindia.com/tcs.pdf",
+        )
+
+        self.assertTrue(chatbot._company_name_matches("TCS", record))
+        self.assertTrue(
+            chatbot._company_name_matches("Tata Consultancy Services Limited", record)
+        )
+        self.assertFalse(chatbot._company_name_matches("Tata Consultancy", record))
+
     def tearDown(self):
         self.temporary_directory.cleanup()
 
@@ -373,6 +390,91 @@ class MetadataIndexingTests(unittest.TestCase):
         self.assertIn("slide 2", {chunk.location for chunk in chunks})
         self.assertNotIn("page 6", {chunk.location for chunk in chunks})
         self.assertTrue(all(not ("Paragraph one." in chunk.text and "Slide two." in chunk.text) for chunk in chunks))
+
+    def test_selected_exchange_filings_keep_sparse_metadata_and_other_records(self):
+        path = self.add_document("filing.pdf")
+        other_id = "other-company-filing"
+        self.collection.records[other_id] = {
+            "document": "other company's already indexed filing",
+            "metadata": {
+                "company": "Other Company",
+                "ticker": "OTHER",
+                "exchange": "BSE",
+                "source_path": str(self.folder / "other-company.pdf"),
+                "file_hash": "unchanged",
+            },
+        }
+        file_metadata = {
+            str(path.resolve()): {
+                "company": "Infosys Limited",
+                "ticker": "INFY",
+                "exchange": "NSE",
+                "exchange_nse": True,
+                "exchange_bse": True,
+                "fiscal_year": "FY2026",
+                "document_type": "Investor Presentation",
+                "original_title": "Q1 FY2026 Investor Presentation",
+                "publication_date": "2026-07-15",
+                "source_url": "https://nsearchives.nseindia.com/infy.pdf",
+                "source_references": "[]",
+            }
+        }
+
+        def extract(document_path, progress_callback=None):
+            return [chatbot.DocumentSegment("Revenue grew in the reporting period.", "page 4")]
+
+        with (
+            patch.object(chatbot, "extract_document_text", side_effect=extract),
+            patch.object(
+                chatbot,
+                "create_embeddings",
+                side_effect=lambda texts, model, progress_callback=None: [
+                    [0.0] * chatbot.EXPECTED_EMBEDDING_DIMENSION for _ in texts
+                ],
+            ),
+        ):
+            report = chatbot.index_documents(
+                self.folder,
+                self.collection,
+                self.model,
+                1000,
+                150,
+                lambda fraction, message: None,
+                file_metadata=file_metadata,
+                selected_paths=[path],
+            )
+
+        self.assertEqual(report["successful_documents"], 1)
+        self.assertEqual(report["extracted_documents"], 1)
+        self.assertEqual(report["document_statuses"][str(path.resolve())], "indexed")
+        self.assertEqual(report["extracted_source_paths"], [str(path.resolve())])
+        self.assertIn(other_id, self.collection.records)
+        metadata = next(
+            record["metadata"]
+            for record in self.collection.records.values()
+            if record["metadata"].get("source_url") == "https://nsearchives.nseindia.com/infy.pdf"
+        )
+        self.assertEqual(metadata["company"], "Infosys Limited")
+        self.assertEqual(metadata["original_title"], "Q1 FY2026 Investor Presentation")
+        self.assertEqual(metadata["publication_date"], "2026-07-15")
+        self.assertTrue(metadata["exchange_bse"])
+
+        with patch.object(
+            chatbot,
+            "create_embeddings",
+            return_value=[[0.0] * chatbot.EXPECTED_EMBEDDING_DIMENSION],
+        ):
+            bse_matches = chatbot.retrieve_relevant_chunks(
+                "revenue", self.collection, self.model, 10,
+                filters={"company": "Infosys Limited", "exchange": "BSE"},
+            )
+            category_matches = chatbot.retrieve_relevant_chunks(
+                "revenue", self.collection, self.model, 10,
+                filters={"document_type": "Investor Presentation", "fiscal_year": "FY2026"},
+            )
+
+        self.assertEqual(len(bse_matches), 1)
+        self.assertEqual(len(category_matches), 1)
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@
 streamlit
 openai
 python-dotenv
+requests
 
 # Local sentence-transformer embeddings; this also installs its model dependencies.
 sentence-transformers

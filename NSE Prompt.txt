@@ -1,0 +1,259 @@
+Act as a senior Python architect, RAG engineer, financial-data integration specialist, and Streamlit developer.
+
+PROJECT: Equity Lens — an exchange-connected Indian equity research platform.
+
+IMPORTANT: First inspect the existing project and understand it before modifying anything. Then implement the requirements incrementally. Do not generate an entirely new application.
+
+EXISTING APPLICATION
+The main file is stock_rag_chatbot.py. The project includes .env, .env.example, README.md, requirements.txt, and an existing ChromaDB database.
+
+The current RAG pipeline:
+- Reads PDF and PPTX documents.
+- Extracts document text.
+- Uses RecursiveCharacterTextSplitter with chunk_size=1000 and chunk_overlap=150.
+- Uses sentence-transformers/all-mpnet-base-v2 embeddings with a 768-dimensional vector configuration and normalized embeddings.
+- Stores chunks in the persistent ChromaDB collection investor_presentations using cosine similarity.
+- Uses Streamlit for the chat interface.
+- Embeds user questions, retrieves Top K relevant chunks (currently K=4), and passes retrieved context to OpenAI GPT-4o-mini.
+- Uses metadata including company, ticker, fiscal_year, quarter, document_type, source_path, and file_hash where implemented.
+
+Inspect the actual code and verify these details before relying on them.
+
+PRIMARY REQUIREMENT
+Transform Equity Lens from a local-folder document chatbot into an exchange-connected research application that discovers and retrieves company disclosures directly from official NSE India and BSE India sources.
+
+REMOVE THE LOCAL-FOLDER UPLOAD WORKFLOW. Do not require users to upload or maintain PDFs/PPTs in a local folder. Users must discover, select, and retrieve company documents from the exchange sources through the Streamlit front end.
+
+Do not remove the existing RAG functionality, embedding model, LLM integration, or compatible ChromaDB data structures unnecessarily.
+
+PHASE 1 — INSPECT THE PROJECT
+1. Read stock_rag_chatbot.py and all supporting source/configuration/documentation files.
+2. Identify existing extraction, recursive chunking, embedding, ChromaDB, retrieval, metadata, duplicate detection, and LLM functions.
+3. Identify the safest way to reuse those components.
+4. Present a short implementation plan before editing files.
+5. Preserve the current working RAG architecture unless a change is necessary.
+
+PHASE 2 — EXCHANGE DOCUMENT DISCOVERY
+Create a modular exchange source layer, preferably exchange_document_source.py, with separate NSE and BSE adapters.
+
+Use official exchange websites, verified public endpoints, or officially supported access methods. Verify endpoint behavior, response formats, document URLs, and applicable usage restrictions before implementation.
+
+Do not invent endpoints, bypass CAPTCHA, evade access controls, or pretend an unavailable interface works.
+
+The system must discover all relevant company filing categories available through the supported exchange sources, including:
+
+A. Quarterly and half-yearly financial results.
+B. Annual financial results and audited results.
+C. Annual reports.
+D. Investor presentations.
+E. Corporate announcements and material events.
+F. Earnings-call transcripts, presentations, recordings, or analyst-meeting disclosures where available.
+G. Shareholding patterns.
+H. Corporate governance and compliance filings.
+I. Credit-rating disclosures and rating changes.
+J. Board meeting notices, outcomes, and related disclosures.
+K. Acquisitions, mergers, investments, new orders, business expansions, litigation, management changes, and other material announcements.
+L. Other company-related exchange filings.
+
+Do not assume all categories are available as downloadable PDFs or that NSE and BSE have identical interfaces. Preserve the original filing category and title.
+
+For unsupported or inaccessible categories, provide a clear limitation and an official exchange search link where possible.
+
+PHASE 3 — FRONT-END COMPANY AND PERIOD SELECTION
+Build the Streamlit interface around the following workflow.
+
+1. COMPANY SELECTION
+- Exchange: NSE, BSE, or both.
+- Company name search.
+- NSE trading symbol or BSE scrip code where applicable.
+- Validate and resolve the selected company to the appropriate exchange identifier.
+- Avoid accidentally mixing similarly named companies.
+
+2. FINANCIAL PERIOD SELECTION
+Provide three modes:
+- Latest available filings.
+- Financial-year range, such as FY2022 through FY2026.
+- Custom publication-date range.
+
+Support selection of individual financial years, multiple years, or all available years within the supported search range.
+
+Where available, display reporting period, quarter, half-year, annual period, and actual publication date. Do not assume that financial year, quarter, and publication date mean the same thing.
+
+If the exchange offers only a limited historical search range, communicate that limitation.
+
+3. DOCUMENT CATEGORY SELECTION
+Provide:
+- All available company-document categories.
+- Individual category checkboxes.
+- A clear-all option.
+- A select-all option.
+- An option to search all announcements within a specified period.
+- An optional keyword or announcement-subject filter.
+
+Users should be able to select, for example, Infosys + FY2022–FY2026 + quarterly results + annual reports + investor presentations, or select all available categories.
+
+4. SEARCH AND PREVIEW
+The Search button must retrieve matching exchange records and display them before downloading.
+
+Show:
+- Company name and ticker.
+- Exchange.
+- Original document title and filing category.
+- Publication date.
+- Reporting period and financial year where available.
+- Downloadable file format and size where available.
+- Official source URL.
+- Current indexing status.
+
+Provide sorting, pagination, and reasonable result limits for large announcement searches.
+
+Do not download all matching documents automatically. Users should explicitly choose which documents or result groups to fetch.
+
+PHASE 4 — DOWNLOAD AND INGESTION
+Provide controls for:
+- Selecting individual documents.
+- Selecting the currently filtered results.
+- Downloading selected documents.
+- Ingesting selected documents into the RAG pipeline.
+- Refreshing the company's indexed filings.
+
+Use a persistent local application cache for downloaded exchange documents and ChromaDB persistence, not a user-managed upload folder. Organize the cache by exchange, company, reporting period, and document category where practical.
+
+Validate URLs, official hosts, redirects, file signatures, content types, file size, and HTTP status. Add timeouts, bounded retries, exponential backoff, and conservative rate limiting.
+
+Reuse existing parsers and ingestion functions wherever possible.
+
+Support PDF and PPT/PPTX, and preserve or add DOCX support if appropriate. Detect unsupported, empty, scanned, corrupted, or unreadable documents and report them clearly. Where practical, support OCR as a separate optional enhancement rather than silently producing empty text.
+
+Use the existing recursive chunking, embedding model, ChromaDB collection, and cosine similarity configuration unless inspection identifies a genuine incompatibility.
+
+Do not create a separate vector database for every financial year. Keep a common searchable collection with reliable metadata filtering.
+
+PHASE 5 — METADATA AND DUPLICATE HANDLING
+Store available metadata for each document and its chunks:
+- company
+- ticker
+- exchange
+- fiscal_year
+- quarter
+- reporting_period
+- document_type
+- original_title
+- publication_date
+- source_url
+- source_path
+- file_hash
+- page_number or slide_number where available
+
+Handle missing metadata explicitly. Never fabricate financial years, publication dates, document types, or page numbers.
+
+Use SHA-256 or the existing hash mechanism to avoid repeated processing of unchanged files.
+
+If the same filing is available on both NSE and BSE, avoid unnecessary duplicate embeddings while retaining both official source references where feasible.
+
+If an existing filing is amended or replaced, update its indexed chunks safely and prevent stale versions from contaminating search results. Preserve historical versions where they are genuinely distinct and useful.
+
+Make ingestion idempotent so rerunning a search does not reprocess unchanged documents.
+
+PHASE 6 — COMPANY RESEARCH CHATBOT
+Retain the existing Streamlit chatbot, GPT-4o-mini integration, embedding model, and Top K retrieval.
+
+Allow users to ask questions across the selected company's indexed filings, for example:
+- Is Infosys financially improving over the last five years?
+- Compare quarterly revenue and profit growth over the last 12 quarters.
+- Compare FY2023, FY2024, FY2025, and FY2026 annual results.
+- Summarize the latest quarterly results and compare them with the corresponding prior-year quarter.
+- What major acquisitions, litigation, or business developments has the company disclosed?
+- What has management communicated about future growth?
+- Are margins improving or deteriorating?
+- Has promoter or institutional shareholding changed?
+- Compare Infosys and TCS over the same financial period.
+
+Use company, exchange, category, financial year, quarter, and date filters where appropriate.
+
+When comparing periods, retrieve sufficient evidence from the relevant periods rather than relying on a single recent document.
+
+Do not treat every corporate announcement as financial results. Distinguish reported facts, management commentary, and derived comparisons.
+
+For quantitative comparisons, extract and verify the relevant figures, reporting periods, units, and standalone versus consolidated basis. Where appropriate, use deterministic Python calculations for growth rates and period comparisons instead of relying solely on LLM arithmetic.
+
+Cite supporting documents with the original title, exchange, publication date, source URL, and page or slide number when available.
+
+Do not claim to have searched the latest exchange filings unless a fresh search was actually completed. If relevant information is unavailable, explicitly say so.
+
+PHASE 7 — PERFORMANCE AND USABILITY
+- Do not automatically download years of every company announcement.
+- Display the expected result count before bulk download where possible.
+- Support pagination and bounded batches.
+- Let users index selected documents or a selected category-period group.
+- Maintain an indexed-document catalogue with ingestion status and document hashes.
+- Cache exchange search results where appropriate, with a clear refresh option.
+- Use Streamlit session state to avoid repeated searches and downloads during reruns.
+- Clearly distinguish discovered, downloaded, extracted, indexed, failed, and skipped documents.
+- Keep the interface understandable for nontechnical investors.
+
+PHASE 8 — SOURCE RELIABILITY AND FALLBACK
+Use only verified official NSE/BSE sources for exchange document discovery.
+
+If an official source cannot be queried programmatically:
+- Explain the limitation.
+- Provide a link to the relevant official search page.
+- Let the user open the filing and, where supported, resume processing through a clearly defined alternative.
+- Do not silently substitute unrelated data or fabricate successful retrieval.
+
+Respect access restrictions, rate limits, applicable terms, and security requirements. Keep credentials out of source code and logs.
+
+PHASE 9 — CONFIGURATION, TESTING AND DOCUMENTATION
+Review .env, .env.example, requirements.txt, and README.md.
+
+Add only necessary dependencies. Document new configuration options without exposing secrets.
+
+Create tests using mocked HTTP responses for:
+- NSE and BSE search results.
+- Company identification and period filters.
+- Each supported document category.
+- Pagination and empty results.
+- Network errors, rate limits, invalid links, and unexpected redirects.
+- Document extraction and metadata.
+- Duplicate detection and re-indexing.
+- Retrieval by company, category, and financial period.
+- Continued operation of the existing RAG and chat functionality.
+
+Do not rely on live exchange availability for normal automated tests. Include a separate optional manual integration test against official exchange sources.
+
+Update README.md with the new architecture, exchange access methods, financial-year selection, document categories, installation, execution, limitations, and testing instructions.
+
+FINAL REQUIREMENTS
+- Implement actual functionality rather than placeholders.
+- Do not invent or assume unverified NSE/BSE APIs.
+- Report the exchange endpoints and access methods actually verified.
+- Report any unsupported categories or historical limitations.
+- Run available tests and report actual outcomes.
+- Check syntax, imports, configuration, and Streamlit startup.
+- List all files created or changed.
+- Provide exact commands to install dependencies and run the application.
+- Ensure the local-folder upload workflow is removed from the primary UI.
+- Ensure the user can select a company, financial-year range, and document categories before fetching exchange filings.
+- Preserve the existing RAG pipeline and persistent ChromaDB wherever feasible.
+
+Work incrementally, explain major design decisions, and do not make unrelated refactoring changes.
+
+Continue the Equity Lens work in the current workspace using `NSE Prompt.txt` as the full requirements specification. Resume from the existing implementation; do not rebuild the app or reapply completed changes.
+
+Before editing, inspect `git status`, the current diffs, and the relevant code. Preserve all existing work and unrelated files, especially the untracked `NSE Prompt.txt`. Do not delete, reset, or rebuild the existing ChromaDB or exchange cache.
+
+Work already completed:
+- Added `exchange_document_source.py` with NSE/BSE adapters, official-host and redirect checks, bounded downloads, rate limiting, and persistent search/document catalogues.
+- Replaced the primary local-folder workflow with company, period, and category discovery; preview; explicit selection; download; and indexing.
+- Added NSE announcement, company-resolution, annual-report, and financial-results access, while retaining the existing RAG collection, embeddings, chunking, and chat.
+- Updated configuration, README, and mocked tests. The last full test run passed 46 tests.
+- Verified NSE endpoints including `/api/corporate-announcements`, `/api/equity-metainfo`, `/api/annual-reports`, and `/api/corporates-financial-results`.
+- BSE’s observed official API returned HTTP 403 in this environment. Keep the official BSE search-page fallback; do not retry around or bypass the denial.
+
+Remaining work:
+1. Diagnose and verify the final Streamlit startup and discovery UI. Check whether port 8501 is already running before launching another instance.
+2. A 30-second `AppTest` timed out during cold imports in ChromaDB’s `jsonschema`/`rfc3987_syntax`/Lark dependency chain. Use a sufficient cold-start timeout and distinguish dependency import time from an application exception. The Streamlit health endpoint previously returned HTTP 200; an earlier browser search also succeeded.
+3. Review the current implementation against `NSE Prompt.txt`, fix only concrete gaps, and rerun syntax checks, diagnostics, and the full test suite.
+4. Finish with verified endpoint/access limitations, test results, changed-file list, and install/run commands.
+
+Do not claim unavailable BSE retrieval works, and do not make unrelated refactors.

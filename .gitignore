@@ -11,6 +11,7 @@ env/
 # Persistent vector database and generated caches
 chroma_db/
 **/chroma_db/
+exchange_cache/
 __pycache__/
 *.py[cod]
 .pytest_cache/

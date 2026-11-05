@@ -1,8 +1,8 @@
-# Stock Market Analysis RAG Chatbot
+# Equity Lens
 
-A local Streamlit application for asking questions about investor presentations in PDF and PowerPoint format. It extracts document text, creates local embeddings with `sentence-transformers/all-mpnet-base-v2`, stores searchable chunks in persistent ChromaDB, and sends the question plus matching excerpts to OpenAI `gpt-4o-mini` for an answer. Explicit image or infographic requests first use the same ChromaDB retrieval, then use GPT-4o-mini to prepare a grounded brief and the OpenAI Images API to create an image.
+An exchange-connected Streamlit research application for discovering company disclosures from official NSE India and BSE India sources, previewing selected records, downloading selected PDF/PPTX files into an application-managed cache, and indexing them in the existing persistent ChromaDB collection. It retains `sentence-transformers/all-mpnet-base-v2` embeddings, recursive chunking, cosine retrieval, and OpenAI `gpt-4o-mini` answers.
 
-The chatbot answers only from the presentations you index. It does **not** retrieve live stock prices, news, filings, or other market data. It is not investment advice.
+Answers use indexed filing evidence only. Search is explicit and bounded; no filings are downloaded until selected. The app does **not** retrieve live stock prices or market data and is not investment advice.
 
 ## Requirements
 
@@ -23,24 +23,23 @@ python --version
 
 The output should begin with `Python 3.11` or `Python 3.12`. If `python` is not found, rerun the installer with PATH enabled or use the Python launcher (`py -3.12`).
 
-### 2. Create the project and presentations folders
+### 2. Create the project folder
 
 Open PowerShell and run:
 
 ```powershell
 New-Item -ItemType Directory -Force "$HOME\Desktop\Equity Lens"
-New-Item -ItemType Directory -Force "$HOME\Desktop\investor_presentations"
 ```
 
-Keep `stock_rag_chatbot.py`, `.env`, `.gitignore`, `requirements.txt`, and `README.md` in the project folder. Place your `.pdf` and `.pptx` presentations directly inside `investor_presentations`.
+Keep the project files in the workspace. Exchange downloads and search-result cache are created automatically under `EXCHANGE_CACHE_PATH`; users do not maintain a filing upload folder.
 
 ### 3. Configure `.env`
 
-Copy `.env.example` to `.env` in the project folder. Replace `YOUR_USERNAME` in `DOCUMENTS_FOLDER` with your Windows account folder name, or set it to another folder containing your presentations. Replace the API key placeholder with your own key:
+Copy `.env.example` to `.env` in the project folder. Replace the API key placeholder with your own key:
 
 ```dotenv
 OPENAI_API_KEY=your_openai_api_key_here
-DOCUMENTS_FOLDER=C:/Users/YOUR_USERNAME/Desktop/investor_presentations
+EXCHANGE_CACHE_PATH=./exchange_cache
 CHROMA_DB_PATH=./chroma_db
 EMBEDDING_MODEL=sentence-transformers/all-mpnet-base-v2
 OPENAI_MODEL=gpt-4o-mini
@@ -52,7 +51,7 @@ CHUNK_SIZE=1000
 CHUNK_OVERLAP=150
 ```
 
-Do not add quotes around ordinary values. Keep the key private: `.env` is excluded by `.gitignore`; never commit it, paste it into source code, or share it. The chatbot displays a folder override in its sidebar for the current run; edit `.env` to make the location permanent.
+Do not add quotes around ordinary values. Keep the key private: `.env` is excluded by `.gitignore`; never commit it, paste it into source code, or share it. `EXCHANGE_CACHE_PATH` and `CHROMA_DB_PATH` are persistent local application data, not upload locations.
 
 ### 4. Create and activate a virtual environment
 
@@ -95,19 +94,32 @@ This project is a Streamlit application. Streamlit starts and manages its own Uv
 python -m streamlit run stock_rag_chatbot.py
 ```
 
-This command starts Streamlit's Uvicorn server and opens the local app in your browser (normally at `http://localhost:8501`). Keep the terminal open while using the app; press `Ctrl+C` there to stop the server. Add presentations to the configured folder, then choose **Index / Refresh Documents** in the sidebar. Wait for indexing to finish and ask a question in the chat box. The answer includes expandable source filenames, page or slide locations, and retrieved text excerpts.
+This command starts Streamlit and opens the local app in your browser (normally at `http://localhost:8501`). Choose an exchange and exact identifier, select a financial-year or publication-date range and categories, search, preview, then explicitly select filings to download and index. Keep the terminal open while using the app; press `Ctrl+C` there to stop the server.
 
-## RAG pipeline
+## Exchange discovery and RAG pipeline
 
-1. The app reads `.pdf` and `.pptx` files directly inside `DOCUMENTS_FOLDER`. PDFs are extracted page by page; PowerPoint files are extracted slide by slide, including table text. Empty pages and slides are skipped.
-2. Before indexing, review each file's metadata in **Review document metadata**. A standardized filename can prefill the form: `Company__Ticker__FY2026__Q1__Investor_Presentation.pdf`. If a filename does not match that format, enter company, ticker, financial year, quarter, and document type yourself. The app does not guess missing values.
-3. Each page or slide is split independently with `RecursiveCharacterTextSplitter`. It prefers paragraph breaks, then line and sentence boundaries, then word and character boundaries. `CHUNK_SIZE` (default `1000`) and `CHUNK_OVERLAP` (default `150`) are character counts set in `.env`; every chunk keeps its original page or slide label.
-4. The app embeds each chunk with Hugging Face `sentence-transformers/all-mpnet-base-v2`. The app checks that the model returns **768-dimensional vectors**. Question vectors are generated with that same model and normalization setting.
-5. One persistent ChromaDB collection stores every company's chunks. Each chunk has `company`, `ticker`, `fiscal_year`, `quarter`, `document_type`, `source`, `source_path`, `file_hash`, `chunk_number`, and `location`, alongside its text and vector.
-6. ChromaDB applies metadata `where` filters before semantic ranking. Selected company, year, and quarter fields combine with AND; multiple values use Chroma's `$in` operator. The retrieval function also accepts explicit `where_document` text-contains filters. With no selected or recognized filters, it searches across all indexed companies and years.
-7. Multi-year questions are retrieved separately for each requested financial year and then combined with year labels intact. The answer instructions require the model to keep each period separate. A missing company/year/quarter match is reported instead of widening the search.
-8. File path and content hashes form unique chunk IDs. Re-indexing uses `upsert`, so repeated runs do not duplicate chunks; changed content receives new IDs and old chunks are removed only after replacement succeeds. Metadata-only edits update the same IDs. **Rebuild selected folder index** safely re-reads that folder without deleting the database or another folder's records. Existing databases remain readable; re-index files after reviewing metadata to migrate old records in place.
-9. ChromaDB returns the `TOP_K` semantically similar excerpts within the requested filter. OpenAI receives company, ticker, year, quarter, filename, and page/slide labels and is instructed not to mix values across periods.
+1. The primary interface searches by exact NSE symbol and/or numeric BSE scrip code. An optional company-name field is an exact legal-name filter; company names alone are not used to resolve identifiers.
+2. Search periods are latest (past 365 days), selected financial years, or a custom publication-date range. NSE's filing API and BSE's search page provide exchange publication dates; fiscal year and quarter are stored only when stated in the filing text. The exchange may restrict historical results, and the app caps each exchange result set at 100 records.
+3. Category filters cover financial results, annual reports, investor presentations, material announcements, earnings calls/analyst meetings, shareholding patterns, governance/compliance, credit ratings, board meetings, and other company filings. Original exchange title and category are retained. Keyword filtering is optional.
+4. Search results are previewed and paginated before any download. Users explicitly select records, download selected records, then index them. **Refresh this result page** is an explicit group action; it does not fetch every year or every company announcement.
+5. The exchange adapter validates HTTPS hostnames, every redirect, response status/content type, PDF/PPTX signatures, and a 50 MB limit. Requests have timeouts, bounded retries, exponential backoff, and per-host throttling. Files and search results are cached under `EXCHANGE_CACHE_PATH` by exchange/company/period/category.
+6. PDFs are extracted page by page; PPTX presentations are extracted slide by slide, including table text. Empty or unreadable documents are reported as failed. Scanned PDFs require OCR before their text can be indexed; OCR is not silently claimed.
+7. `RecursiveCharacterTextSplitter` keeps page/slide boundaries, using `CHUNK_SIZE=1000` and `CHUNK_OVERLAP=150` by default. `sentence-transformers/all-mpnet-base-v2` generates normalized 768-dimensional vectors.
+8. The existing persistent ChromaDB collection `investor_presentations` remains shared across companies and years, with cosine similarity. Chunk metadata includes available company, ticker/code, exchange, financial year, quarter, reporting period, original category/title, publication date, source URL/path, SHA-256 hash, and page/slide location. Missing fields remain empty rather than being inferred.
+9. Content hashes prevent duplicate embeddings within a selected batch and unchanged downloads reuse their cache file. Re-indexing a changed filing replaces its prior chunks safely. When identical NSE/BSE files are selected together, one copy is embedded and both official references are saved in metadata.
+10. Retrieval applies company, exchange, category, year, quarter, and publication-date metadata filters before semantic search. Multi-year requests retrieve each selected fiscal year independently. GPT answers distinguish reported results, material announcements, and management commentary, and cite filing title, exchange, publication date, official URL, and page/slide where available.
+
+### Verified exchange access and limitations
+
+- **NSE India announcements:** the official [Corporate Filings - Announcements](https://www.nseindia.com/companies-listing/corporate-filings-announcements) page calls `GET https://www.nseindia.com/api/corporate-announcements?index=equities...`. The live request returned HTTP 200 JSON with `symbol`, `sm_name`, `desc`, `attchmntText`, `an_dt`, `attchmntFile`, `fileSize`, and `seq_id` fields.
+- **NSE annual reports:** the official [Annual Reports](https://www.nseindia.com/companies-listing/corporate-filings-annual-reports) page calls `GET https://www.nseindia.com/api/annual-reports?index=equities&symbol=INFY`. The live response returned company name, `fromYr`/`toYr`, submission type, publication timestamps, file size, and an official NSE Archives PDF URL.
+- **NSE financial results:** the official [Financial Results](https://www.nseindia.com/companies-listing/corporate-filings-financial-results) page calls `GET https://www.nseindia.com/api/corporates-financial-results?index=equities&symbol=INFY&period=Quarterly` (and `Half-Yearly`/`Annual`). The live response included reporting dates, `financialYear`, `relatingTo`, audited/consolidated basis, and XBRL/detail links. These entries are previewable; XBRL/XML and HTML files are not treated as indexable PDFs. The announcements feed also includes downloadable result attachments when the exchange provides them.
+- For [shareholding patterns](https://www.nseindia.com/companies-listing/corporate-filings-shareholding-pattern), [governance](https://www.nseindia.com/companies-listing/corporate-filings-governance), and [board meetings](https://www.nseindia.com/companies-listing/corporate-filings-board-meetings), the app searches the official equities announcement feed and exposes the dedicated official search page as a fallback. It does not claim that every specialized catalogue is completely mirrored by that feed.
+- **BSE India:** the official search page is [Latest Corporate Announcements](https://www.bseindia.com/corporates/ann). Its live page issued a request to `https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w` with date, category, and scrip parameters. A direct request from this environment returned HTTP 403, so automatic BSE retrieval is not claimed as working here; the app displays the official search link. The BSE search page exposes announcement categories and paging, and separate official results and board-meeting pages.
+- Official exchange feeds may not expose every filing as a downloadable PDF/PPTX. XBRL, HTML, transcript audio, and other unsupported formats can be opened at the official source but are not indexed by the current extractors. Legacy `.ppt` binary files are not supported; PDF and `.pptx` are supported.
+- No CAPTCHA, access control, or exchange denial is bypassed. Search history and request quotas are controlled by the exchange; narrow dates and categories for older or large searches. The local 100-record cap is a performance guard, not a claim that the exchange has no more records.
+
+The NSE announcement response does not return a separate formal title field: the UI retains its attachment-description text as the displayed title and preserves `desc` as the original exchange category. The annual-report API also has no formal title field; the UI labels the filing from its explicit year range and submission type. The official NSE company metadata endpoint `https://www.nseindia.com/api/equity-metainfo?symbol=INFY` was verified to resolve `INFY` to Infosys Limited and return an empty object for an unknown symbol.
 
 ## Image generation
 
@@ -127,12 +139,19 @@ With the virtual environment active, run the local tests:
 python -m unittest discover -s tests -v
 ```
 
-The tests mock ChromaDB results and OpenAI calls; they do not spend API credits. In the app, index presentations first, then try these prompts:
+Optional live smoke checks are separate from the automated suite and make requests only to the official exchange pages. The BSE check may report its current HTTP 403 restriction and print the official fallback link:
+
+```powershell
+python tests/manual_exchange_smoke.py --exchange NSE --nse-symbol INFY
+python tests/manual_exchange_smoke.py --exchange BSE --bse-code 500209
+```
+
+The tests use mocked exchange responses, ChromaDB results, and OpenAI calls; they do not depend on exchange availability or spend API credits. Search and index filings in the app, then try these prompts:
 
 | Prompt | Expected behavior |
 | --- | --- |
 | `What was revenue in FY2025?` | Text answer only |
-| `Summarize the investor presentation` | Text answer only |
+| `Summarize the latest quarterly results` | Text answer only, grounded in indexed filings |
 | `Create an A4 infographic showing revenue growth` | Retrieve evidence, generate and display a PNG infographic |
 | `Create a graph of revenue growth by fiscal year` | Draw a graph only if at least two comparable, source-verified fiscal-year values are retrieved; otherwise explain which data is missing |
 | `Generate an infographic about the company's business segments` | Retrieve evidence, generate and display a PNG infographic |
@@ -140,14 +159,14 @@ The tests mock ChromaDB results and OpenAI calls; they do not spend API credits.
 
 Also check the missing-key and simulated image-API failure tests in the command above; they verify the app returns useful errors instead of crashing.
 
-Scanned PDFs that contain page images but no selectable text are not OCR'd by this app. Use OCR software to make them searchable before indexing. If a PDF has no extractable text, the app reports it as a file-level indexing error.
+Scanned PDFs that contain page images but no selectable text are not OCR'd by this app. If a PDF has no extractable text, the app reports it as a file-level indexing error.
 
 ## Configuration
 
 | Setting | Purpose |
 | --- | --- |
 | `OPENAI_API_KEY` | Secret key used only for answer generation through OpenAI |
-| `DOCUMENTS_FOLDER` | Folder containing investor presentation PDFs and PPTX files |
+| `EXCHANGE_CACHE_PATH` | Persistent app-managed filing and search-result cache; defaults to `./exchange_cache` |
 | `CHROMA_DB_PATH` | Persistent local ChromaDB data directory |
 | `EMBEDDING_MODEL` | Hugging Face sentence-transformer used for both documents and questions |
 | `OPENAI_MODEL` | OpenAI chat model; defaults to `gpt-4o-mini` |
@@ -160,9 +179,9 @@ Scanned PDFs that contain page images but no selectable text are not OCR'd by th
 
 ## Metadata and filtering
 
-The recommended filename is `Company__Ticker__FY2026__Q1__Investor_Presentation.pdf` (or `.pptx`). Use double underscores between the five fields. The financial year uses `FY2026`; quarter can be `Q1` through `Q4`, `FY`, or `Annual`. Filename extraction only prefills the review form; save checked metadata for every file before indexing. Other filename patterns require manual entry.
+Exchange-provided company, ticker/code, exchange, original title/category, publication date, and source URL are stored when present. Financial year, quarter, reporting period, and page/slide are not fabricated when missing. A single identical document returned by both exchanges can be indexed once while retaining both source references.
 
-The sidebar lists indexed companies, the financial years for the selected company, and available quarters. Leaving a control at “All” does not apply that filter. You can select multiple years for comparison or mention known company names/tickers and `FY####` periods in a question. Source labels include company, ticker, year, quarter, filename, and page/slide. Old chunks without the new fields remain stored until their source files are re-indexed with reviewed metadata; migration never clears the database automatically.
+The sidebar lists indexed companies, years, quarters, categories, and exchanges. You can select multiple years for comparison or mention known company names/tickers and `FY####` periods in a question. Existing Chroma records remain intact; exchange data uses the same collection and does not trigger folder reconciliation.
 
 ## Troubleshooting
 
@@ -175,14 +194,15 @@ The sidebar lists indexed companies, the financial years for the selected compan
 - **Infographic omits a fact:** Only quotations found exactly in retrieved chunks are rendered as factual labels. Try a more specific request or verify that the relevant presentation was indexed and the requested information appears in its text.
 - **Embedding model download fails:** Check internet access, free disk space, and Hugging Face availability. The model downloads the first time it is loaded and is cached for later runs.
 - **Embedding dimension error:** Keep `EMBEDDING_MODEL=sentence-transformers/all-mpnet-base-v2`. This application requires its 768-dimensional output.
-- **No documents found:** Check the folder path shown in the sidebar and place PDF/PPTX files directly inside it. The app creates a missing folder, but it cannot find files in the wrong location or nested subfolders.
+- **No filings found:** Confirm the exact exchange symbol/scrip code, date range, company name, and selected categories. Use the official exchange search link if the exchange endpoint is unavailable or has limited history.
+- **BSE returns HTTP 403:** This environment's direct BSE endpoint request was denied. The app will not retry around that restriction; open the official BSE announcements search page instead. NSE search can still be used independently.
 - **PDF or PowerPoint extraction error:** Confirm the document opens normally and is not damaged or password-protected. Scanned/image-only PDFs need OCR before this application can retrieve their contents.
 - **ChromaDB permission or database error:** Close other app instances using the same database, confirm the project folder is writable, and check that `CHROMA_DB_PATH` points to a local writable directory. Do not delete `chroma_db` unless you intend to rebuild the index.
-- **The answer says evidence is missing:** Re-index after adding or editing files, and try a more specific question. The app only searches extracted text in indexed presentations; it does not browse the web or retrieve live market data.
+- **The answer says evidence is missing:** Search and index the relevant filing, narrow the retrieval filters, and try a specific question. The app only searches extracted text in indexed filings; it does not retrieve live market data.
 
 ## Privacy and cost
 
-PDF/PPTX extraction, embeddings, Pillow composition, and the ChromaDB index run locally. The embedding model is downloaded from Hugging Face on first use. For text answers, the question and retrieved presentation excerpts are sent to OpenAI. For image requests, the question and excerpts are also sent to GPT-4o-mini to prepare the brief, and that brief is sent to the image API. Do not index confidential material unless this use complies with your organization's policies and OpenAI account terms. The API key stays in `.env` and is not written to the ChromaDB records.
+PDF/PPTX extraction, embeddings, Pillow composition, the filing cache, and ChromaDB index run locally. The embedding model is downloaded from Hugging Face on first use. For text answers, the question and retrieved filing excerpts are sent to OpenAI. For image requests, the question and excerpts are also sent to GPT-4o-mini to prepare the brief, and that brief is sent to the image API. The API key stays in `.env` and is not written to ChromaDB.
 
 OpenAI usage may incur API charges. Costs depend on the length of questions, retrieved excerpts, conversation history, model pricing, image size/quality, and how often you ask for an image. Local document indexing does not call the OpenAI API. Check your OpenAI account's current pricing and usage limits.
 
