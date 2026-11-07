@@ -17,6 +17,8 @@ python-pptx
 
 # Recursive paragraph/sentence/word-aware text chunking.
 langchain-text-splitters
+langgraph
+langgraph-checkpoint-sqlite
 
 # Draw verified financial text over generated infographic backgrounds.
 pillow

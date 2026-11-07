@@ -14,11 +14,13 @@ from datetime import date, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, Literal
+from uuid import UUID
 
 # These packages power the app's web page, local vector database, settings, and AI.
 import chromadb
 import streamlit as st
 from dotenv import load_dotenv
+from langchain_core.messages import HumanMessage
 # These names let the app give useful messages for common OpenAI connection failures.
 from openai import (
     APIConnectionError,
@@ -56,6 +58,11 @@ from exchange_document_source import (
     load_document_catalog,
     save_search_cache,
     save_document_catalog,
+)
+from equitylens_graph import (
+    build_equitylens_graph,
+    get_sqlite_checkpointer,
+    new_thread_id,
 )
 
 
@@ -2500,28 +2507,62 @@ def main() -> None:
 
     render_exchange_discovery(config, collection, indexed_metadata)
 
-    # Create chat history the first time this browser session opens the app.
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
+    checkpoint_path = str(Path(__file__).with_name("equitylens_checkpoints.sqlite"))
+    checkpointer_resource = get_sqlite_checkpointer(checkpoint_path)
+    graph = build_equitylens_graph(
+        collection=collection,
+        model_provider=lambda: load_embedding_model(config.embedding_model),
+        config=config,
+        process_user_question=process_user_question,
+        find_unmatched_filter_values=find_unmatched_filter_values,
+        checkpointer=checkpointer_resource.checkpointer,
+    )
 
-    # Re-draw earlier messages whenever Streamlit refreshes the page after an action.
-    for message_number, message in enumerate(st.session_state.chat_history):
-        # Use the saved role so user and assistant messages look different.
-        with st.chat_message(message["role"]):
-            # Display the saved message text.
-            st.markdown(message["content"])
-            # Restore the generated PNG when Streamlit redraws saved chat messages.
-            if message.get("image_bytes"):
-                st.image(message["image_bytes"], use_container_width=True)
-                st.download_button(
-                    "Download infographic (PNG)",
-                    data=message["image_bytes"],
-                    file_name="investor_presentation_infographic.png",
-                    mime="image/png",
-                    key=f"download-infographic-{message_number}",
-                )
-            # Assistant messages may also include evidence and source labels.
-            display_sources(message.get("sources", []))
+    if "thread_id" not in st.session_state:
+        saved_thread_id = st.query_params.get("thread_id", "")
+        try:
+            st.session_state.thread_id = str(UUID(saved_thread_id))
+        except (ValueError, TypeError, AttributeError):
+            st.session_state.thread_id = new_thread_id()
+    st.query_params["thread_id"] = st.session_state.thread_id
+    graph_config = {
+        "configurable": {
+            "thread_id": st.session_state.thread_id,
+        }
+    }
+
+    with st.sidebar:
+        st.header("Conversation")
+        st.caption("Each conversation has its own persistent graph checkpoint.")
+        if st.button("Start new conversation", key="new_conversation"):
+            st.session_state.thread_id = new_thread_id()
+            st.query_params["thread_id"] = st.session_state.thread_id
+            st.rerun()
+
+    # LangGraph's checkpointed messages are the sole source of chat history.
+    snapshot = graph.get_state(graph_config)
+    conversation_messages = (snapshot.values or {}).get("messages", [])
+    for message_number, message in enumerate(conversation_messages):
+        role = "assistant" if message.type == "ai" else "user"
+        message_metadata = getattr(message, "additional_kwargs", {})
+        with st.chat_message(role):
+            st.markdown(message.content if isinstance(message.content, str) else str(message.content))
+            image_path = message_metadata.get("image_path")
+            if image_path:
+                try:
+                    image_bytes = Path(image_path).read_bytes()
+                    st.image(image_bytes, use_container_width=True)
+                    st.download_button(
+                        "Download infographic (PNG)",
+                        data=image_bytes,
+                        file_name="investor_presentation_infographic.png",
+                        mime="image/png",
+                        key=f"download-infographic-{message_number}",
+                    )
+                except OSError:
+                    st.warning("The generated image file is no longer available.")
+            if role == "assistant":
+                display_sources(message_metadata.get("sources", []))
 
     # Show the chat input at the bottom and return text when the user submits a question.
     question = st.chat_input("Ask about this company's indexed exchange filings")
@@ -2547,107 +2588,70 @@ def main() -> None:
         elif requested_years:
             st.caption(f"Single-year search: {requested_years if isinstance(requested_years, str) else requested_years[0]}.")
 
-        # Save the user's message so it remains visible after Streamlit reruns the script.
-        st.session_state.chat_history.append({"role": "user", "content": question})
-        # Draw the new question immediately in the conversation.
+        # Show this turn immediately; later reruns render it from the checkpoint.
         with st.chat_message("user"):
             st.markdown(question)
 
-        # Reserve a chat area for the answer and keep related messages together.
         with st.chat_message("assistant"):
-            # Keep all multi-step question processing inside one visible loading indicator.
             with st.spinner("Searching presentations and preparing your response..."):
                 try:
-                    # Exclude this new question from the old history sent as follow-up context.
-                    past_history = [
-                        {"role": item["role"], "content": item["content"]}
-                        for item in st.session_state.chat_history[:-1]
-                        if item["role"] in {"user", "assistant"}
-                    ]
-                    model = load_embedding_model(config.embedding_model)
-                    # Route the question through shared retrieval and its text/image branch.
-                    result = process_user_question(
-                        question=question,
-                        collection=collection,
-                        model=model,
-                        history=past_history,
-                        config=config,
-                        filters=question_filters,
+                    result = graph.invoke(
+                        {
+                            "question": question,
+                            "messages": [HumanMessage(content=question)],
+                            "filters": question_filters,
+                        },
+                        config=graph_config,
                     )
-                    answer = result["answer"]
-                    sources = result["sources"]
-                    image_bytes = result["image_bytes"]
-                    # Keep handled API problems visually distinct from successful answers.
+                    answer = result.get("answer", "The question could not be processed.")
+                    sources = result.get("sources", [])
+                    image_path = result.get("image_path")
                     if result.get("is_error", False):
                         st.error(answer)
                     else:
-                        # Show the returned text for normal answers and image requests alike.
                         st.markdown(answer)
-                    # Only image-intent results contain bytes, so normal questions stay text-only.
-                    if image_bytes:
+                    if image_path and Path(image_path).is_file():
+                        image_bytes = Path(image_path).read_bytes()
                         st.image(image_bytes, use_container_width=True)
                         st.download_button(
                             "Download infographic (PNG)",
                             data=image_bytes,
                             file_name="investor_presentation_infographic.png",
                             mime="image/png",
-                            key=f"download-new-infographic-{len(st.session_state.chat_history)}",
+                            key=f"download-new-infographic-{len(conversation_messages)}",
                         )
-                    # Let the user inspect the source excerpts behind either response type.
                     display_sources(sources)
                 except ValueError as error:
-                    # Missing keys, invalid prompts, and image-response issues are actionable.
                     answer = str(error)
                     sources = []
-                    image_bytes = None
                     st.error(answer)
                 except AuthenticationError:
-                    # The same API key is used for text, prompt preparation, and image calls.
                     answer = "OpenAI rejected the API key. Check OPENAI_API_KEY in .env."
                     sources = []
-                    image_bytes = None
                     st.error(answer)
                 except RateLimitError:
-                    # Explain that the account may need a quota/billing check before retrying.
                     answer = "OpenAI rate limit or quota reached. Check your account and retry later."
                     sources = []
-                    image_bytes = None
                     st.error(answer)
                 except APIConnectionError:
-                    # Network errors should not crash the Streamlit session.
                     answer = "Could not connect to OpenAI. Check your internet connection and retry."
                     sources = []
-                    image_bytes = None
                     st.error(answer)
                 except (APIError, OpenAIError):
-                    # This may include unavailable image models or missing organization access.
                     answer = (
                         "OpenAI could not complete the request. Check model access, "
                         "organization verification, and API usage, then retry."
                     )
                     sources = []
-                    image_bytes = None
                     st.error(answer)
                 except Exception as error:
-                    # Show a safe error type while keeping credentials and excerpts private.
                     logging.exception("Unexpected error while processing a question")
                     answer = (
                         f"The question could not be processed ({type(error).__name__}). "
                         "Try again or check the terminal for a local diagnostic."
                     )
                     sources = []
-                    image_bytes = None
                     st.error(answer)
-
-        # Save the message, citations, and optional image for future Streamlit reruns.
-        st.session_state.chat_history.append(
-            {
-                "role": "assistant",
-                "content": answer,
-                "sources": sources,
-                "image_bytes": image_bytes,
-            }
-        )
 
 
 # Run the web application only when this file is launched as the main script.

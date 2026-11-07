@@ -2,6 +2,8 @@
 
 An exchange-connected Streamlit research application for discovering company disclosures from official NSE India and BSE India sources, previewing selected records, downloading selected PDF/PPTX files into an application-managed cache, and indexing them in the existing persistent ChromaDB collection. It retains `sentence-transformers/all-mpnet-base-v2` embeddings, recursive chunking, cosine retrieval, and OpenAI `gpt-4o-mini` answers.
 
+LangGraph manages question answering and conversation history only. Document discovery, download, extraction, chunking, embedding, duplicate detection, refresh, and ChromaDB indexing remain in the existing ingestion workflow. ChromaDB stores indexed filing chunks and vectors; `equitylens_checkpoints.sqlite` stores conversation checkpoints. Each conversation uses its own UUID thread ID, retained in the browser URL so the same conversation can resume after an application restart. Generated images are referenced by temporary local file paths, not stored as image bytes in checkpoints.
+
 Answers use indexed filing evidence only. Search is explicit and bounded; no filings are downloaded until selected. The app does **not** retrieve live stock prices or market data and is not investment advice.
 
 ## Requirements
@@ -138,6 +140,8 @@ With the virtual environment active, run the local tests:
 ```powershell
 python -m unittest discover -s tests -v
 ```
+
+The LangGraph tests use a temporary SQLite database and mocked question processing, so they do not call paid OpenAI APIs. Start a separate conversation with **Start new conversation**; to resume the current one after an app restart, reopen the same browser URL.
 
 Optional live smoke checks are separate from the automated suite and make requests only to the official exchange pages. The BSE check may report its current HTTP 403 restriction and print the official fallback link:
 

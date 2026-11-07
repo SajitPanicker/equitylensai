@@ -12,6 +12,7 @@ env/
 chroma_db/
 **/chroma_db/
 exchange_cache/
+equitylens_checkpoints.sqlite*
 __pycache__/
 *.py[cod]
 .pytest_cache/
