@@ -18,6 +18,12 @@ python-pptx
 # Recursive paragraph/sentence/word-aware text chunking.
 langchain-text-splitters
 
+# Parent orchestration and subgraphs.
+langgraph
+
+# Yahoo Finance market and fundamentals integration.
+yfinance
+
 # Draw verified financial text over generated infographic backgrounds.
 pillow
 

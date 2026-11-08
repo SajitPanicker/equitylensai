@@ -1,8 +1,8 @@
 # Equity Lens
 
-An exchange-connected Streamlit research application for discovering company disclosures from official NSE India and BSE India sources, previewing selected records, downloading selected PDF/PPTX files into an application-managed cache, and indexing them in the existing persistent ChromaDB collection. It retains `sentence-transformers/all-mpnet-base-v2` embeddings, recursive chunking, cosine retrieval, and OpenAI `gpt-4o-mini` answers.
+An exchange-connected Streamlit research application for discovering company disclosures from official NSE India and BSE India sources, previewing selected records, downloading selected PDF/PPTX files into an application-managed cache, and indexing them in the existing persistent ChromaDB collection. A parent LangGraph classifies each question and routes it to exchange-filing RAG, Yahoo Finance, or both. The app retains `sentence-transformers/all-mpnet-base-v2` embeddings, recursive chunking, cosine retrieval, and OpenAI `gpt-4o-mini` answers.
 
-Answers use indexed filing evidence only. Search is explicit and bounded; no filings are downloaded until selected. The app does **not** retrieve live stock prices or market data and is not investment advice.
+Filing answers use indexed evidence. Market answers use Yahoo Finance's latest available data, which is not guaranteed real-time. Filing search is explicit and bounded; no filings are downloaded until selected. The app is not investment advice.
 
 ## Requirements
 
@@ -109,6 +109,14 @@ This command starts Streamlit and opens the local app in your browser (normally 
 9. Content hashes prevent duplicate embeddings within a selected batch and unchanged downloads reuse their cache file. Re-indexing a changed filing replaces its prior chunks safely. When identical NSE/BSE files are selected together, one copy is embedded and both official references are saved in metadata.
 10. Retrieval applies company, exchange, category, year, quarter, and publication-date metadata filters before semantic search. Multi-year requests retrieve each selected fiscal year independently. GPT answers distinguish reported results, material announcements, and management commentary, and cite filing title, exchange, publication date, official URL, and page/slide where available.
 
+## Question routing and graph architecture
+
+The Streamlit chat invokes the parent graph in `equitylens_graph.py`. Its `intent_classification_node` calls the reusable OpenAI classification helper in `stock_rag_chatbot.py`, then validates the returned source flags. `route_by_intent` is ordinary Python: LangGraph's `add_conditional_edges()` uses its `"rag"`, `"yahoo"`, or `"both"` result to choose the next node.
+
+The parent invokes the question-time RAG subgraph in `rag_graph.py` to return retrieved filing evidence and the Yahoo Finance subgraph in `yahoo_finance_graph.py` to return structured, bounded market data. For financial questions, `financial_synthesis_node` sends the original question, recent conversation history, and only the selected source data to GPT-4o-mini for a grounded analysis. Yahoo Finance historical returns and available revenue/profit changes are calculated in Python and passed separately from source figures. If both sources are selected, LangGraph runs them in parallel and waits for both before synthesis; a failed source is disclosed while available evidence can still be used. Explicit image requests retain the existing image-generation path. Conversation messages are checkpointed in `equitylens_checkpoints.sqlite`, with a separate thread ID for each Streamlit session. This routing does not change filing ingestion, the ChromaDB collection, or the embedding model.
+
+Yahoo Finance is accessed through `yfinance`, an unofficial interface to Yahoo Finance. Its data can be delayed, incomplete, or unavailable; it must not be represented as guaranteed real-time exchange data. Review Yahoo/yfinance terms and applicable commercial-use and redistribution requirements before deploying or redistributing the app.
+
 ### Verified exchange access and limitations
 
 - **NSE India announcements:** the official [Corporate Filings - Announcements](https://www.nseindia.com/companies-listing/corporate-filings-announcements) page calls `GET https://www.nseindia.com/api/corporate-announcements?index=equities...`. The live request returned HTTP 200 JSON with `symbol`, `sm_name`, `desc`, `attchmntText`, `an_dt`, `attchmntFile`, `fileSize`, and `seq_id` fields.
@@ -165,7 +173,7 @@ Scanned PDFs that contain page images but no selectable text are not OCR'd by th
 
 | Setting | Purpose |
 | --- | --- |
-| `OPENAI_API_KEY` | Secret key used only for answer generation through OpenAI |
+| `OPENAI_API_KEY` | Secret key used for intent classification and answer generation through OpenAI |
 | `EXCHANGE_CACHE_PATH` | Persistent app-managed filing and search-result cache; defaults to `./exchange_cache` |
 | `CHROMA_DB_PATH` | Persistent local ChromaDB data directory |
 | `EMBEDDING_MODEL` | Hugging Face sentence-transformer used for both documents and questions |
@@ -198,12 +206,12 @@ The sidebar lists indexed companies, years, quarters, categories, and exchanges.
 - **BSE returns HTTP 403:** This environment's direct BSE endpoint request was denied. The app will not retry around that restriction; open the official BSE announcements search page instead. NSE search can still be used independently.
 - **PDF or PowerPoint extraction error:** Confirm the document opens normally and is not damaged or password-protected. Scanned/image-only PDFs need OCR before this application can retrieve their contents.
 - **ChromaDB permission or database error:** Close other app instances using the same database, confirm the project folder is writable, and check that `CHROMA_DB_PATH` points to a local writable directory. Do not delete `chroma_db` unless you intend to rebuild the index.
-- **The answer says evidence is missing:** Search and index the relevant filing, narrow the retrieval filters, and try a specific question. The app only searches extracted text in indexed filings; it does not retrieve live market data.
+- **The answer says filing evidence is missing:** Search and index the relevant filing, narrow the retrieval filters, and try a specific question. Market questions use Yahoo Finance; its values are latest available, not guaranteed real-time.
 
 ## Privacy and cost
 
-PDF/PPTX extraction, embeddings, Pillow composition, the filing cache, and ChromaDB index run locally. The embedding model is downloaded from Hugging Face on first use. For text answers, the question and retrieved filing excerpts are sent to OpenAI. For image requests, the question and excerpts are also sent to GPT-4o-mini to prepare the brief, and that brief is sent to the image API. The API key stays in `.env` and is not written to ChromaDB.
+PDF/PPTX extraction, embeddings, Pillow composition, the filing cache, and ChromaDB index run locally. The embedding model is downloaded from Hugging Face on first use. The question is sent to OpenAI for intent classification; the financial-analysis request sends GPT-4o-mini the selected NSE/BSE evidence and/or structured Yahoo Finance data, along with relevant conversation history. For image requests, the question and filing excerpts are sent to GPT-4o-mini to prepare the brief, and that brief is sent to the image API. Yahoo Finance requests use the unofficial yfinance interface. The API key stays in `.env` and is not written to ChromaDB.
 
 OpenAI usage may incur API charges. Costs depend on the length of questions, retrieved excerpts, conversation history, model pricing, image size/quality, and how often you ask for an image. Local document indexing does not call the OpenAI API. Check your OpenAI account's current pricing and usage limits.
 
-This tool is for document analysis only. It does not fetch current prices, market data, or news and should not be used as financial advice.
+This tool is for financial research and is not financial advice. Yahoo Finance data may be delayed or incomplete; verify important figures from appropriate primary sources.
