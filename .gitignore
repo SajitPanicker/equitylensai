@@ -24,3 +24,4 @@ __pycache__/
 .idea/
 Thumbs.db
 Desktop.ini
+equitylens_checkpoints.sqlite*

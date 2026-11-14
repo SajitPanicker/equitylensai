@@ -20,6 +20,12 @@ langchain-text-splitters
 langgraph
 langgraph-checkpoint-sqlite
 
+# Parent orchestration and subgraphs.
+langgraph
+
+# Yahoo Finance market and fundamentals integration.
+yfinance
+
 # Draw verified financial text over generated infographic backgrounds.
 pillow
 

@@ -73,6 +73,26 @@ class ImageRoutingTests(unittest.TestCase):
 
         self.run_text_case("What was revenue in FY2025?")
 
+    def test_market_data_routing_is_not_implemented_in_rag_processor(self) -> None:
+        """Only the parent graph, not the RAG workflow, selects Yahoo Finance."""
+
+        with (
+            patch.object(chatbot, "retrieve_relevant_chunks", return_value=self.matches),
+            patch.object(chatbot, "get_openai_client", return_value=Mock()),
+            patch.object(chatbot, "answer_with_rag", return_value="RAG answer"),
+            patch("yahoo_finance_source.fetch_yahoo_finance_data") as fetch_yahoo,
+        ):
+            result = chatbot.process_user_question(
+                "What is Infosys valuation as of today?",
+                self.collection,
+                Mock(),
+                [],
+                self.config,
+            )
+
+        fetch_yahoo.assert_not_called()
+        self.assertEqual(result["answer"], "RAG answer")
+
     def test_presentation_summary_returns_text_only(self) -> None:
         """A normal presentation summary does not invoke image generation."""
 
