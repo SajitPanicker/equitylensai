@@ -26,6 +26,9 @@ langgraph
 # Yahoo Finance market and fundamentals integration.
 yfinance
 
+# Official Model Context Protocol client SDK.
+mcp>=2.0,<3.0
+
 # Draw verified financial text over generated infographic backgrounds.
 pillow
 
