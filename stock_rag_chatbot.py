@@ -1215,11 +1215,7 @@ def classify_financial_intent(
     config: AppConfig,
     client: OpenAI | None = None,
 ) -> dict[str, Any]:
-    """Ask the LLM for a validated source-intent classification.
-
-    The helper owns only the prompt, API call, and output validation. The parent
-    LangGraph decides which nodes run based on the returned flags.
-    """
+    """Ask the LLM for validated RAG/Yahoo/Zerodha source routing."""
 
     if not question.strip():
         raise ValueError("A question is required for intent classification.")
@@ -1230,13 +1226,25 @@ def classify_financial_intent(
             {
                 "role": "system",
                 "content": (
-                    "Classify the financial question's evidence sources. Use RAG for "
-                    "company filings and disclosures, Yahoo Finance for market prices "
-                    "or current market/fundamental data, and both when both kinds of "
-                    "evidence are needed. Reply as a JSON object with company_name, "
-                    "ticker, analysis_type ('rag', 'yahoo', or 'both'), and "
-                    "classification_reason. Do not invent a ticker; leave it blank "
-                    "unless the user provided or the company is unambiguously known."
+                    "Classify one financial question for independent evidence sources. "
+                    "Return exactly a JSON object with company_name, ticker, sources, "
+                    "and classification_reason.\n"
+                    "Use \"rag\" for annual reports, quarterly results, statements, "
+                    "disclosures, NSE/BSE announcements, investor presentations, "
+                    "management commentary, and historical document-based company performance.\n"
+                    "Use \"yahoo\" for current or historical share prices, market "
+                    "capitalization, P/E, P/B, EPS, dividend yield, market performance, "
+                    "financial ratios, and current market information.\n"
+                    "Use \"zerodha\" only for the user's authenticated personal account "
+                    "data: my portfolio, holdings, positions, purchase or average price, "
+                    "profit/loss, allocation, margins, profile, or owned-stock performance.\n"
+                    "Do not route generic education or hypothetical/model portfolios to "
+                    "zerodha. A company question can require rag and/or yahoo. A question "
+                    "that combines owned holdings with company evidence can use rag, yahoo, "
+                    "and zerodha. Select the minimum sources required.\n"
+                    "sources must be a non-empty list containing only rag, yahoo, and "
+                    "zerodha; names are normalized. Remove duplicates. Never invent tickers "
+                    "and leave ticker blank unless clearly established. Output JSON only."
                 ),
             },
             {"role": "user", "content": question},
@@ -1254,15 +1262,44 @@ def classify_financial_intent(
     if not isinstance(payload, dict):
         raise ValueError("The intent classifier response must be a JSON object.")
 
-    analysis_type = str(payload.get("analysis_type", "")).strip().lower()
-    if analysis_type not in {"rag", "yahoo", "both"}:
-        raise ValueError("The intent classifier returned an unsupported analysis_type.")
+    raw_sources = payload.get("sources")
+    if isinstance(raw_sources, list):
+        sources = []
+        for source in raw_sources:
+            normalized = str(source).strip().lower()
+            if normalized not in {"rag", "yahoo", "zerodha"}:
+                raise ValueError(
+                    "The intent classifier returned an unsupported source name."
+                )
+            if normalized not in sources:
+                sources.append(normalized)
+    else:
+        # Backward compatibility for an older classifier/client during rollout.
+        legacy = str(payload.get("analysis_type") or "").strip().lower()
+        legacy_sources = {
+            "rag": ["rag"],
+            "yahoo": ["yahoo"],
+            "both": ["rag", "yahoo"],
+        }
+        sources = legacy_sources.get(legacy, [])
+    if not sources:
+        raise ValueError("The intent classifier sources list must be non-empty.")
+    use_rag = "rag" in sources
+    use_yahoo_finance = "yahoo" in sources
+    use_zerodha = "zerodha" in sources
+    analysis_type = (
+        "both"
+        if sources == ["rag", "yahoo"]
+        else "+".join(sources)
+    )
     return {
         "company_name": str(payload.get("company_name") or "").strip(),
         "ticker": str(payload.get("ticker") or "").strip().upper(),
+        "sources": sources,
         "analysis_type": analysis_type,
-        "use_rag": analysis_type in {"rag", "both"},
-        "use_yahoo_finance": analysis_type in {"yahoo", "both"},
+        "use_rag": use_rag,
+        "use_yahoo_finance": use_yahoo_finance,
+        "use_zerodha": use_zerodha,
         "classification_reason": str(payload.get("classification_reason") or "").strip(),
     }
 
@@ -1383,9 +1420,15 @@ def answer_with_financial_context(
             }
         )
 
+    zerodha_portfolio_data = (
+        market_data.pop("_zerodha_portfolio_data", {})
+        if isinstance(market_data, dict)
+        else {}
+    )
     selected_context = {
         "official_nse_bse_document_evidence": document_context,
         "yahoo_finance_market_data": market_data,
+        "zerodha_personal_portfolio_data": zerodha_portfolio_data,
         "python_calculated_metrics": {
             "historical_returns": market_data.get("historical_returns", {}),
             "revenue_profit_changes": (market_data.get("calculated_financial_metrics") or {}).get(
@@ -1402,6 +1445,7 @@ Clearly distinguish:
 - reported facts from official NSE/BSE filings, identifying the document, financial period,
   publication date, and page/location when provided;
 - market facts from Yahoo Finance, identifying the ticker and retrieval timestamp;
+- personal account facts from Zerodha, labeled as the user's authenticated portfolio;
 - metrics calculated by Python, including their input periods;
 - your own interpretation, which must be labeled as interpretation.
 Use Python-provided returns and metrics rather than recalculating them. Explain revenue,
@@ -2756,6 +2800,7 @@ def _get_parent_orchestration_graph(_collection: Any, _config: AppConfig) -> Any
     from equitylens_graph import build_equitylens_graph, get_sqlite_checkpointer
     from rag_graph import build_rag_graph
     from yahoo_finance_graph import build_yahoo_finance_graph
+    from zerodha_portfolio_graph import build_zerodha_portfolio_graph
 
     database_path = Path(__file__).with_name("equitylens_checkpoints.sqlite")
     checkpointer_resource = get_sqlite_checkpointer(str(database_path))
@@ -2781,6 +2826,7 @@ def _get_parent_orchestration_graph(_collection: Any, _config: AppConfig) -> Any
             answer_runner=answer_with_rag,
         ),
         yahoo_graph_builder=build_yahoo_finance_graph,
+        zerodha_graph_builder=build_zerodha_portfolio_graph,
     )
 
 
@@ -2910,6 +2956,32 @@ def main() -> None:
             st.session_state.thread_id = new_thread_id()
             st.query_params["thread_id"] = st.session_state.thread_id
             st.rerun()
+
+    with st.sidebar:
+        st.header("Zerodha")
+        zerodha_status = st.session_state.get("zerodha_status", "disconnected")
+        if zerodha_status == "connected":
+            st.success("Zerodha: Connected")
+        elif zerodha_status == "checking":
+            st.info("Zerodha: Connecting...")
+        else:
+            st.warning("Zerodha: Disconnected")
+        if st.button("Connect to Zerodha", key="connect_zerodha"):
+            st.session_state.zerodha_status = "checking"
+            try:
+                import asyncio
+                from zerodha_source import ZerodhaMCPClient
+
+                async def _check_connection() -> None:
+                    async with ZerodhaMCPClient() as client:
+                        await client.discover_tools()
+
+                asyncio.run(_check_connection())
+                st.session_state.zerodha_status = "connected"
+                st.success("Zerodha authorization completed.")
+            except Exception as error:
+                st.session_state.zerodha_status = "disconnected"
+                st.error(f"Zerodha authentication or connection failed: {type(error).__name__}")
 
     # LangGraph's checkpointed messages are the sole source of chat history.
     snapshot = graph.get_state(graph_config)

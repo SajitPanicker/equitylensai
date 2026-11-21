@@ -133,3 +133,24 @@ successful mocked test is not evidence that a live account has authenticated.
   policy. Tool discovery is authoritative for the running session. This phase
   does not invoke order, GTT, or other trading tools, even if they appear in
   the discovery list.
+
+## Equity Lens integration
+
+`zerodha_portfolio_graph.py` is a separate LangGraph subgraph. It creates an
+isolated `ZerodhaMCPClient`, discovers live tools, and requests only read-only
+profile, holdings, positions, or margins data selected from the user's
+question. The client and OAuth state remain in memory for that invocation and
+are closed afterward. Portfolio results never enter authentication or MCP
+checkpoint fields.
+
+The parent graph selects RAG, Yahoo Finance, and Zerodha independently. It can
+run one, two, or all three branches and synchronizes selected branches before
+financial synthesis. Authentication failure in the Zerodha branch is reported
+without silently replacing personal holdings with Yahoo Finance or RAG data.
+
+The Streamlit sidebar provides a connection status and a Connect to Zerodha
+action. The current loopback OAuth callback is local-development-only. A hosted
+multi-user deployment needs a public HTTPS callback registered with the OAuth
+provider, isolated per-user session handling, and a deployment-safe browser
+authorization flow. Do not persist tokens or MCP clients in checkpoints or
+shared session state.

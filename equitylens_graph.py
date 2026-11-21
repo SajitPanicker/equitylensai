@@ -32,12 +32,17 @@ class EquityLensState(TypedDict, total=False):
     analysis_type: str
     use_rag: bool
     use_yahoo_finance: bool
+    use_zerodha: bool
     classification_reason: str
     classification_error: str | None
     rag_result: dict[str, Any]
     yahoo_result: dict[str, Any]
     document_evidence: list[dict[str, Any]]
     market_data: dict[str, Any]
+    zerodha_result: dict[str, Any]
+    portfolio_data: dict[str, Any]
+    zerodha_error: str | None
+    zerodha_auth_status: str
 
 
 class SqliteCheckpointResource:
@@ -100,12 +105,21 @@ def _history_for_answer(messages: list[AnyMessage], question: str) -> list[dict[
 
 
 def route_by_intent(state: EquityLensState) -> str:
-    """Choose a graph branch from validated booleans; invalid combinations use RAG."""
+    """Choose one of the seven supported source combinations."""
 
     use_rag = state.get("use_rag") is True
     use_yahoo_finance = state.get("use_yahoo_finance") is True
+    use_zerodha = state.get("use_zerodha") is True
+    if use_rag and use_yahoo_finance and use_zerodha:
+        return "rag_yahoo_zerodha"
     if use_rag and use_yahoo_finance:
         return "both"
+    if use_rag and use_zerodha:
+        return "rag_zerodha"
+    if use_yahoo_finance and use_zerodha:
+        return "yahoo_zerodha"
+    if use_zerodha:
+        return "zerodha"
     if use_yahoo_finance:
         return "yahoo"
     return "rag"
@@ -129,8 +143,9 @@ def build_equitylens_graph(
     needs_visual_clarification: Callable[[str], bool],
     rag_graph_builder: Callable[..., Any],
     yahoo_graph_builder: Callable[[], Any],
+    zerodha_graph_builder: Callable[[], Any] | None = None,
 ):
-    """Build the parent graph that classifies and coordinates the two source subgraphs."""
+    """Build the parent graph that classifies and coordinates three source subgraphs."""
 
     embedding_model_provider = embedding_model_provider or model_provider
 
@@ -150,12 +165,17 @@ def build_equitylens_graph(
             "analysis_type": state.get("analysis_type", "rag"),
             "use_rag": True,
             "use_yahoo_finance": False,
+            "use_zerodha": False,
             "classification_reason": "",
             "classification_error": None,
             "rag_result": {},
             "yahoo_result": {},
             "document_evidence": [],
             "market_data": {},
+            "zerodha_result": {},
+            "portfolio_data": {},
+            "zerodha_error": None,
+            "zerodha_auth_status": "not_requested",
         }
 
     def validation_node(state: EquityLensState) -> dict[str, Any]:
@@ -185,32 +205,39 @@ def build_equitylens_graph(
                 "analysis_type": "rag",
                 "use_rag": True,
                 "use_yahoo_finance": False,
+                "use_zerodha": False,
                 "classification_reason": "An empty question cannot be classified; using RAG as a safe default.",
             }
 
         try:
             # Keep the LLM prompt/API call in a reusable helper; this node owns state updates.
             classification = classification_helper(question, config, model_provider())
-            analysis_type = classification.get("analysis_type")
-            valid_flags = {
-                "rag": (True, False),
-                "yahoo": (False, True),
-                "both": (True, True),
-            }
-            if analysis_type not in valid_flags:
-                raise ValueError("The classifier returned an unsupported analysis type.")
-            use_rag, use_yahoo_finance = valid_flags[analysis_type]
-            if (
-                classification.get("use_rag") is not use_rag
-                or classification.get("use_yahoo_finance") is not use_yahoo_finance
-            ):
-                raise ValueError("The classifier returned inconsistent source flags.")
+            sources = classification.get("sources")
+            if not isinstance(sources, list):
+                legacy = str(classification.get("analysis_type") or "").strip().lower()
+                sources = {
+                    "rag": ["rag"],
+                    "yahoo": ["yahoo"],
+                    "both": ["rag", "yahoo"],
+                    "rag+yahoo": ["rag", "yahoo"],
+                }.get(legacy, [])
+            normalized_sources = list(dict.fromkeys(
+                str(source).strip().lower()
+                for source in sources
+                if str(source).strip().lower() in {"rag", "yahoo", "zerodha"}
+            ))
+            if not normalized_sources:
+                raise ValueError("The classifier returned no supported sources.")
+            use_rag = "rag" in normalized_sources
+            use_yahoo_finance = "yahoo" in normalized_sources
+            use_zerodha = "zerodha" in normalized_sources
             return {
                 "company_name": str(classification.get("company_name") or "").strip(),
                 "ticker": str(classification.get("ticker") or "").strip(),
-                "analysis_type": analysis_type,
+                "analysis_type": "+".join(normalized_sources),
                 "use_rag": use_rag,
                 "use_yahoo_finance": use_yahoo_finance,
+                "use_zerodha": use_zerodha,
                 "classification_reason": str(classification.get("classification_reason") or "").strip(),
                 "classification_error": None,
             }
@@ -222,6 +249,7 @@ def build_equitylens_graph(
                 "analysis_type": "rag",
                 "use_rag": True,
                 "use_yahoo_finance": False,
+                "use_zerodha": False,
                 "classification_reason": "Intent classification failed; safely routing to RAG.",
                 "classification_error": f"{type(error).__name__}: {error}",
             }
@@ -272,11 +300,40 @@ def build_equitylens_graph(
             "market_data": yahoo_result.get("market_data") or {},
         }
 
+    def run_zerodha_subgraph(state: EquityLensState) -> dict[str, Any]:
+        if zerodha_graph_builder is None:
+            return {
+                "zerodha_result": {
+                    "answer": "Zerodha integration is not configured.",
+                    "portfolio_data": {},
+                    "auth_status": "disconnected",
+                    "is_error": True,
+                    "error": "Zerodha subgraph is not configured.",
+                },
+                "portfolio_data": {},
+                "zerodha_error": "Zerodha subgraph is not configured.",
+                "zerodha_auth_status": "disconnected",
+            }
+        zerodha_graph = zerodha_graph_builder()
+        zerodha_result = zerodha_graph.invoke({
+            "question": state.get("question", ""),
+        })
+        zerodha_result = dict(zerodha_result)
+        return {
+            "zerodha_result": zerodha_result,
+            "portfolio_data": zerodha_result.get("portfolio_data") or {},
+            "zerodha_error": zerodha_result.get("zerodha_error"),
+            "zerodha_auth_status": zerodha_result.get("zerodha_auth_status", "disconnected"),
+        }
+
     def rag_processing_node(state: EquityLensState) -> dict[str, Any]:
         return run_rag_subgraph(state)
 
     def yahoo_processing_node(state: EquityLensState) -> dict[str, Any]:
         return run_yahoo_subgraph(state)
+
+    def zerodha_processing_node(state: EquityLensState) -> dict[str, Any]:
+        return run_zerodha_subgraph(state)
 
     def parallel_dispatch_node(_: EquityLensState) -> dict[str, Any]:
         # Two outgoing edges below start both source branches in the same graph step.
@@ -288,6 +345,21 @@ def build_equitylens_graph(
     def yahoo_parallel_node(state: EquityLensState) -> dict[str, Any]:
         return run_yahoo_subgraph(state)
 
+    def zerodha_parallel_node(state: EquityLensState) -> dict[str, Any]:
+        return run_zerodha_subgraph(state)
+
+    def rag_yahoo_dispatch_node(_: EquityLensState) -> dict[str, Any]:
+        return {}
+
+    def rag_zerodha_dispatch_node(_: EquityLensState) -> dict[str, Any]:
+        return {}
+
+    def yahoo_zerodha_dispatch_node(_: EquityLensState) -> dict[str, Any]:
+        return {}
+
+    def rag_yahoo_zerodha_dispatch_node(_: EquityLensState) -> dict[str, Any]:
+        return {}
+
     def financial_synthesis_node(state: EquityLensState) -> dict[str, Any]:
         """Analyze selected source evidence after all selected branches finish."""
 
@@ -295,6 +367,8 @@ def build_equitylens_graph(
         yahoo_result = state.get("yahoo_result") or {}
         document_evidence = state.get("document_evidence") or []
         market_data = state.get("market_data") or {}
+        zerodha_result = state.get("zerodha_result") or {}
+        portfolio_data = state.get("portfolio_data") or {}
         sources: list[dict[str, Any]] = []
         source_status: list[str] = []
         if state.get("use_rag"):
@@ -313,6 +387,20 @@ def build_equitylens_graph(
                     "Yahoo Finance market data could not be retrieved: "
                     + str(yahoo_result.get("error_message") or yahoo_result.get("answer") or "no market data returned")
                 )
+        if state.get("use_zerodha"):
+            sources.extend(zerodha_result.get("sources") or [])
+            auth_status = state.get("zerodha_auth_status") or zerodha_result.get("auth_status") or "disconnected"
+            if auth_status == "authentication_required":
+                source_status.append(
+                    "Zerodha account is not connected: authentication is required for personal portfolio data."
+                )
+            elif zerodha_result.get("is_error"):
+                source_status.append(
+                    "Zerodha portfolio data could not be retrieved: "
+                    + str(state.get("zerodha_error") or zerodha_result.get("answer") or "unknown error")
+                )
+            elif not portfolio_data:
+                source_status.append("Zerodha was selected but returned no portfolio fields.")
 
         is_special_rag_request = is_image_generation_request(
             state.get("question", "")
@@ -324,11 +412,14 @@ def build_equitylens_graph(
             history = _history_for_answer(
                 state.get("messages", []), state.get("question", "")
             )
+            synthesis_market_data = dict(market_data)
+            if portfolio_data:
+                synthesis_market_data["_zerodha_portfolio_data"] = portfolio_data
             answer = financial_analysis_runner(
                 state.get("question", ""),
                 history,
                 document_evidence if state.get("use_rag") else [],
-                market_data if state.get("use_yahoo_finance") else {},
+                synthesis_market_data if state.get("use_yahoo_finance") or portfolio_data else {},
                 source_status,
                 config,
                 model_provider(),
@@ -341,7 +432,7 @@ def build_equitylens_graph(
             )
         selected_source_count = int(bool(state.get("use_rag"))) + int(
             bool(state.get("use_yahoo_finance"))
-        )
+        ) + int(bool(state.get("use_zerodha")))
         failed_source_count = len(source_status)
         all_sources_failed = (
             selected_source_count > 0 and failed_source_count == selected_source_count
@@ -396,9 +487,15 @@ def build_equitylens_graph(
     builder.add_node("intent_classification_node", intent_classification_node)
     builder.add_node("rag_processing_node", rag_processing_node)
     builder.add_node("yahoo_processing_node", yahoo_processing_node)
+    builder.add_node("zerodha_processing_node", zerodha_processing_node)
     builder.add_node("parallel_dispatch_node", parallel_dispatch_node)
     builder.add_node("rag_parallel_node", rag_parallel_node)
     builder.add_node("yahoo_parallel_node", yahoo_parallel_node)
+    builder.add_node("zerodha_parallel_node", zerodha_parallel_node)
+    builder.add_node("rag_yahoo_dispatch_node", rag_yahoo_dispatch_node)
+    builder.add_node("rag_zerodha_dispatch_node", rag_zerodha_dispatch_node)
+    builder.add_node("yahoo_zerodha_dispatch_node", yahoo_zerodha_dispatch_node)
+    builder.add_node("rag_yahoo_zerodha_dispatch_node", rag_yahoo_zerodha_dispatch_node)
     builder.add_node("financial_synthesis_node", financial_synthesis_node)
     builder.add_node("response_node", response_node)
     builder.add_node("conversation_update_node", conversation_update_node)
@@ -420,16 +517,31 @@ def build_equitylens_graph(
         {
             "rag": "rag_processing_node",
             "yahoo": "yahoo_processing_node",
-            "both": "parallel_dispatch_node",
+            "zerodha": "zerodha_processing_node",
+            "both": "rag_yahoo_dispatch_node",
+            "rag_yahoo": "rag_yahoo_dispatch_node",
+            "rag_zerodha": "rag_zerodha_dispatch_node",
+            "yahoo_zerodha": "yahoo_zerodha_dispatch_node",
+            "rag_yahoo_zerodha": "rag_yahoo_zerodha_dispatch_node",
         },
     )
     builder.add_edge("rag_processing_node", "financial_synthesis_node")
     builder.add_edge("yahoo_processing_node", "financial_synthesis_node")
-    builder.add_edge("parallel_dispatch_node", "rag_parallel_node")
-    builder.add_edge("parallel_dispatch_node", "yahoo_parallel_node")
-    # A multi-source edge is a synchronization barrier: synthesis waits for both.
+    builder.add_edge("zerodha_processing_node", "financial_synthesis_node")
+    builder.add_edge("rag_yahoo_dispatch_node", "rag_parallel_node")
+    builder.add_edge("rag_yahoo_dispatch_node", "yahoo_parallel_node")
+    builder.add_edge(["rag_parallel_node", "yahoo_parallel_node"], "financial_synthesis_node")
+    builder.add_edge("rag_zerodha_dispatch_node", "rag_parallel_node")
+    builder.add_edge("rag_zerodha_dispatch_node", "zerodha_parallel_node")
+    builder.add_edge(["rag_parallel_node", "zerodha_parallel_node"], "financial_synthesis_node")
+    builder.add_edge("yahoo_zerodha_dispatch_node", "yahoo_parallel_node")
+    builder.add_edge("yahoo_zerodha_dispatch_node", "zerodha_parallel_node")
+    builder.add_edge(["yahoo_parallel_node", "zerodha_parallel_node"], "financial_synthesis_node")
+    builder.add_edge("rag_yahoo_zerodha_dispatch_node", "rag_parallel_node")
+    builder.add_edge("rag_yahoo_zerodha_dispatch_node", "yahoo_parallel_node")
+    builder.add_edge("rag_yahoo_zerodha_dispatch_node", "zerodha_parallel_node")
     builder.add_edge(
-        ["rag_parallel_node", "yahoo_parallel_node"],
+        ["rag_parallel_node", "yahoo_parallel_node", "zerodha_parallel_node"],
         "financial_synthesis_node",
     )
     builder.add_edge("financial_synthesis_node", "response_node")

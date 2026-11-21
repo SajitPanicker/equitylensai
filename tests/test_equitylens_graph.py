@@ -147,6 +147,25 @@ class EquityLensGraphTests(unittest.TestCase):
         self.assertEqual(result["company_name"], "Infosys")
         fake_client.chat.completions.create.assert_called_once()
 
+    def test_classifier_helper_normalizes_sources_and_rejects_duplicates_and_bad_names(self):
+        fake_client = Mock()
+        fake_client.chat.completions.create.return_value.choices = [
+            SimpleNamespace(message=SimpleNamespace(content=(
+                '{"company_name":"Infosys","ticker":"infy.ns",'
+                '"sources":["RAG","zerodha","RAG"],'
+                '"classification_reason":"Own holdings and filings"}'
+            )))
+        ]
+        with patch.object(chatbot, "get_openai_client", return_value=fake_client):
+            result = chatbot.classify_financial_intent(
+                "How strong are my Infosys holdings based on annual reports?",
+                SimpleNamespace(openai_model="gpt-4o-mini"),
+            )
+        self.assertEqual(result["sources"], ["rag", "zerodha"])
+        self.assertEqual(result["ticker"], "INFY.NS")
+        self.assertTrue(result["use_rag"])
+        self.assertTrue(result["use_zerodha"])
+
     def test_classifier_helper_rejects_invalid_intent(self):
         fake_client = Mock()
         fake_client.chat.completions.create.return_value.choices = [
