@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable, TypedDict
 
 from langgraph.graph import END, START, StateGraph
+
+logger = logging.getLogger(__name__)
 
 
 class RAGGraphState(TypedDict, total=False):
@@ -50,6 +53,7 @@ def build_rag_graph(
     retrieval_runner: Callable[..., list[dict[str, Any]]],
     client_provider: Callable[[], Any],
     answer_runner: Callable[[str, list[dict[str, Any]], list[dict[str, str]], Any, Any], str],
+    rerank_runner: Callable[[str, list[dict[str, Any]]], list[dict[str, Any]]] | None = None,
     history_provider: Callable[[str], list[dict[str, str]]] | None = None,
     question_processor: Callable[..., dict[str, Any]] | None = None,
     defer_answer: bool = False,
@@ -91,8 +95,11 @@ def build_rag_graph(
             return {"processed_result": result}
         filters = state.get("filters") or {}
         try:
+            retrieval_k = getattr(config, "rag_retrieval_k", None)
+            if retrieval_k is None:
+                retrieval_k = config.top_k
             matches = retrieval_runner(
-                question, collection, model, config.top_k, filters=filters
+                question, collection, model, retrieval_k, filters=filters
             )
         except Exception as error:
             return {
@@ -102,6 +109,29 @@ def build_rag_graph(
                 "error_message": f"{type(error).__name__}: {error}",
                 "is_error": True,
             }
+        if matches and rerank_runner is not None:
+            final_k = getattr(config, "rag_final_k", None)
+            if final_k is None:
+                final_k = config.top_k
+            try:
+                reranked_matches = rerank_runner(question, matches)
+                if reranked_matches:
+                    matches = reranked_matches
+                else:
+                    logger.warning(
+                        "Reranking returned no documents; retaining the first %d "
+                        "ChromaDB similarity-ranked result(s)",
+                        final_k,
+                    )
+                    matches = matches[:final_k]
+            except Exception as error:
+                logger.warning(
+                    "Reranking failed (%s); retaining the first %d ChromaDB "
+                    "similarity-ranked result(s)",
+                    type(error).__name__,
+                    final_k,
+                )
+                matches = matches[:final_k]
         if not matches:
             requested_scope = ", ".join(
                 f"{field.replace('_', ' ')}: {', '.join(value) if isinstance(value, list) else value}"

@@ -47,6 +47,10 @@ IMAGE_MODEL=gpt-image-2.5-flare
 IMAGE_SIZE=1024x1536
 IMAGE_QUALITY=medium
 TOP_K=4
+RAG_RETRIEVAL_K=20
+RAG_FINAL_K=4
+COHERE_API_KEY=
+COHERE_RERANK_MODEL=rerank-v5.0-fast
 CHUNK_SIZE=1000
 CHUNK_OVERLAP=150
 ```
@@ -107,7 +111,33 @@ This command starts Streamlit and opens the local app in your browser (normally 
 7. `RecursiveCharacterTextSplitter` keeps page/slide boundaries, using `CHUNK_SIZE=1000` and `CHUNK_OVERLAP=150` by default. `sentence-transformers/all-mpnet-base-v2` generates normalized 768-dimensional vectors.
 8. The existing persistent ChromaDB collection `investor_presentations` remains shared across companies and years, with cosine similarity. Chunk metadata includes available company, ticker/code, exchange, financial year, quarter, reporting period, original category/title, publication date, source URL/path, SHA-256 hash, and page/slide location. Missing fields remain empty rather than being inferred.
 9. Content hashes prevent duplicate embeddings within a selected batch and unchanged downloads reuse their cache file. Re-indexing a changed filing replaces its prior chunks safely. When identical NSE/BSE files are selected together, one copy is embedded and both official references are saved in metadata.
-10. Retrieval applies company, exchange, category, year, quarter, and publication-date metadata filters before semantic search. Multi-year requests retrieve each selected fiscal year independently. GPT answers distinguish reported results, material announcements, and management commentary, and cite filing title, exchange, publication date, official URL, and page/slide where available.
+10. Retrieval applies company, exchange, category, year, quarter, and publication-date metadata filters before semantic search. Multi-year requests retrieve each selected fiscal year independently. ChromaDB returns up to `RAG_RETRIEVAL_K` candidates, then optional Cohere Rerank orders those candidates by question relevance and retains up to `RAG_FINAL_K` excerpts. GPT answers distinguish reported results, material announcements, and management commentary, and cite filing title, exchange, publication date, official URL, and page/slide where available.
+
+### Optional Cohere reranking
+
+The filing question path uses this sequence:
+
+```text
+User question
+  -> existing all-mpnet-base-v2 query embedding
+  -> ChromaDB cosine-similarity search (up to RAG_RETRIEVAL_K candidates)
+  -> Cohere Rerank (up to RAG_FINAL_K most relevant chunks)
+  -> existing financial context and source-citation processing
+  -> GPT-4o-mini answer
+```
+
+Vector similarity is a fast first-stage search: it compares the query and indexed chunks as embedding vectors. Reranking is a second-stage comparison: Cohere reads the question and each candidate's text to order the already-retrieved chunks by semantic relevance. It does not replace ChromaDB, alter the embedding model, or change indexed records. The reranker maps Cohere's returned indices back to the original ChromaDB records, preserving their metadata and citations.
+
+Reranking uses the Cohere v2 Rerank API through the Python SDK (`ClientV2` and `rerank`). Cohere's current documentation lists `rerank-v5.0-fast` as an available model; it is the default selected for the lower-latency option. Set `COHERE_RERANK_MODEL` to another currently available model if desired. See Cohere's [Rerank model documentation](https://docs.cohere.com/docs/rerank) and [v2 API reference](https://docs.cohere.com/reference/rerank) for current availability and request details.
+
+Configuration precedence is per setting:
+
+- `RAG_RETRIEVAL_K` sets the number of ChromaDB candidates. If omitted, legacy `TOP_K` is used; otherwise the default is `20`.
+- `RAG_FINAL_K` sets the number of chunks passed to the existing answer/context flow. If omitted, legacy `TOP_K` is used; otherwise the default is `4`.
+- Explicit `RAG_*` settings take precedence over `TOP_K`. Existing installations with only `TOP_K` retain their previous retrieval and final-context count. New `.env` files use `20` candidates and `4` final chunks.
+- `COHERE_API_KEY` is optional and should be kept private. `COHERE_RERANK_MODEL` defaults to `rerank-v5.0-fast`.
+
+If the key is missing, the SDK is unavailable, the request times out, Cohere rate-limits or fails, or the response is invalid, the app logs the reason and uses the original ChromaDB similarity order rather than dropping evidence. An empty ChromaDB result remains empty and does not trigger a Cohere request.
 
 ## Question routing and graph architecture
 
@@ -134,7 +164,7 @@ The NSE announcement response does not return a separate formal title field: the
 - Ordinary questions such as “What was revenue in FY2025?” stay on the text-only RAG path. The app does not make an image request for them.
 - Only a clear request to create, generate, draw, or produce a visual output is routed to image generation. A question such as “What information would a revenue infographic contain?” stays text-only. Tentative visual ideas can prompt a short clarification.
 - The app retrieves presentation excerpts first. GPT-4o-mini prepares a structured image brief with exact quotations and source indices. The app checks each quotation against the retrieved text and only overlays quotations that match; the image model is asked to create a decorative background without factual labels or figures.
-- Requests for a **graph**, **chart**, or **plot** use a stricter path: GPT-4o-mini proposes dated points and verbatim source quotes, then the app validates each period, value, metric, and unit against retrieved excerpts. Pillow draws the graph locally; the image model is not used to draw data. A graph needs at least two individually dated observations of the same metric and unit. A multi-year CAGR is one summary value, not a sequence of annual points. If the retrieved excerpts do not contain enough comparable values, the app explains that and refuses to invent the graph. Increasing `TOP_K` or asking about a specific presentation section can help retrieve more relevant data, but cannot supply figures absent from the documents.
+- Requests for a **graph**, **chart**, or **plot** use a stricter path: GPT-4o-mini proposes dated points and verbatim source quotes, then the app validates each period, value, metric, and unit against retrieved excerpts. Pillow draws the graph locally; the image model is not used to draw data. A graph needs at least two individually dated observations of the same metric and unit. A multi-year CAGR is one summary value, not a sequence of annual points. If the retrieved excerpts do not contain enough comparable values, the app explains that and refuses to invent the graph. Increasing `RAG_RETRIEVAL_K` or asking about a specific presentation section can help retrieve more relevant data, but cannot supply figures absent from the documents.
 - `client.images.generate()` uses the configurable `IMAGE_MODEL`. The default is `gpt-image-2.5-flare`; the official image-generation guide also documents `gpt-image-2.5-sunburst`. Portrait `1024x1536` is a documented supported size for an A4-style layout; this is a pixel aspect ratio, not print-ready A4 resolution.
 - The app uses Pillow to overlay exact, source-checked text and citations, displays the PNG in chat, and provides a download button. This avoids relying on the image model to spell financial names, dates, or figures correctly.
 - Image generation is a separate paid API capability. Verify that your OpenAI organization and project have access to the selected image model. Organization verification may be required for GPT Image models. `gpt-4o-mini` access for text does not by itself guarantee image-model access.
@@ -183,7 +213,11 @@ Scanned PDFs that contain page images but no selectable text are not OCR'd by th
 | `IMAGE_MODEL` | OpenAI Images API model; defaults to `gpt-image-2.5-flare` |
 | `IMAGE_SIZE` | Supported output size; defaults to portrait `1024x1536` |
 | `IMAGE_QUALITY` | Image quality (`low`, `medium`, `high`, `xhigh`, `max`, or `auto`) |
-| `TOP_K` | Maximum number of matching chunks sent with a question |
+| `RAG_RETRIEVAL_K` | Maximum ChromaDB candidate chunks fetched before reranking; defaults to `20` |
+| `RAG_FINAL_K` | Maximum chunks retained for existing financial context and answer generation; defaults to `4` |
+| `TOP_K` | Legacy fallback for either RAG count whose newer `RAG_*` setting is omitted |
+| `COHERE_API_KEY` | Optional Cohere API key; without it, ChromaDB similarity ranking is used |
+| `COHERE_RERANK_MODEL` | Cohere Rerank model; defaults to the currently documented `rerank-v5.0-fast` |
 | `CHUNK_SIZE` | Recursive splitter target length in characters; defaults to `1000` |
 | `CHUNK_OVERLAP` | Repeated characters between adjacent chunks; defaults to `150` and must be smaller than `CHUNK_SIZE` |
 

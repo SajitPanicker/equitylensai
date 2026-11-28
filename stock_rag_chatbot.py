@@ -60,10 +60,12 @@ from exchange_document_source import (
     save_search_cache,
     save_document_catalog,
 )
+from cohere_reranker import rerank_documents
 
 
 # all-mpnet-base-v2 represents each piece of text using 768 numbers.
 EXPECTED_EMBEDDING_DIMENSION = 768
+logger = logging.getLogger(__name__)
 # ChromaDB uses this name to find the saved document collection again next time.
 COLLECTION_NAME = "investor_presentations"
 # Files with other endings are skipped because this app cannot extract them.
@@ -114,6 +116,11 @@ class AppConfig:
     chunk_size: int
     # Number of characters repeated between neighboring pieces for context.
     chunk_overlap: int
+    # Optional values keep older AppConfig constructors and TOP_K-only settings compatible.
+    rag_retrieval_k: int | None = None
+    rag_final_k: int | None = None
+    cohere_api_key: str = ""
+    cohere_rerank_model: str = "rerank-v5.0-fast"
 
 
 @dataclass
@@ -157,6 +164,7 @@ def load_configuration() -> AppConfig:
 
     # Load key/value settings from the .env file into Python's environment.
     load_dotenv()
+    legacy_top_k = os.getenv("TOP_K")
     # Read each setting; defaults keep optional settings usable if a value is absent.
     config = AppConfig(
         # Strip accidental spaces from the secret without ever printing it.
@@ -178,14 +186,26 @@ def load_configuration() -> AppConfig:
         # Medium quality is a practical default for time and cost.
         image_quality=os.getenv("IMAGE_QUALITY", "medium").strip().lower(),
         # Convert text settings to integers so they can be used in calculations.
-        top_k=int(os.getenv("TOP_K", "4")),
+        top_k=int(legacy_top_k or "4"),
         chunk_size=int(os.getenv("CHUNK_SIZE", "1000")),
         chunk_overlap=int(os.getenv("CHUNK_OVERLAP", "150")),
+        rag_retrieval_k=int(
+            os.getenv("RAG_RETRIEVAL_K", legacy_top_k or "20")
+        ),
+        rag_final_k=int(os.getenv("RAG_FINAL_K", legacy_top_k or "4")),
+        cohere_api_key=os.getenv("COHERE_API_KEY", "").strip(),
+        cohere_rerank_model=os.getenv(
+            "COHERE_RERANK_MODEL", "rerank-v5.0-fast"
+        ).strip(),
     )
 
     # A search cannot retrieve zero results, so require at least one.
     if config.top_k < 1:
         raise ValueError("TOP_K must be at least 1.")
+    if config.rag_retrieval_k is not None and config.rag_retrieval_k < 1:
+        raise ValueError("RAG_RETRIEVAL_K must be at least 1.")
+    if config.rag_final_k is not None and config.rag_final_k < 1:
+        raise ValueError("RAG_FINAL_K must be at least 1.")
     # Chunks must contain at least one character.
     if config.chunk_size < 1:
         raise ValueError("CHUNK_SIZE must be at least 1.")
@@ -759,6 +779,7 @@ def retrieve_relevant_chunks(
     available_count = count_matching_records(collection, where)
     # No indexed text means there is nothing for the chatbot to search.
     if available_count == 0:
+        logger.info("ChromaDB returned 0 document(s)")
         return []
 
     # Encode the question with the same model and 768-number format as document chunks.
@@ -779,11 +800,32 @@ def retrieve_relevant_chunks(
     metadatas = results.get("metadatas", [[]])[0]
     distances = results.get("distances", [[]])[0]
     # Pair each piece of text with where it came from and how close the match was.
-    return [
+    matches = [
         {"text": text, "metadata": metadata, "distance": distance}
         for text, metadata, distance in zip(documents, metadatas, distances)
         if text and metadata
     ]
+    logger.info("ChromaDB returned %d document(s)", len(matches))
+    return matches
+
+
+def rerank_retrieved_chunks(
+    question: str,
+    documents: list[dict[str, Any]],
+    config: AppConfig,
+) -> list[dict[str, Any]]:
+    """Rerank retrieved chunks once while preserving their original metadata records."""
+
+    final_k = config.rag_final_k
+    if final_k is None:
+        final_k = config.top_k
+    return rerank_documents(
+        question,
+        documents,
+        final_k,
+        api_key=config.cohere_api_key,
+        model=config.cohere_rerank_model,
+    )
 
 
 def count_matching_records(collection: Any, where: dict[str, Any] | None = None) -> int:
@@ -2020,8 +2062,11 @@ def process_user_question(
         }
 
     # Both workflows use the exact same existing ChromaDB retrieval function.
+    retrieval_k = config.rag_retrieval_k
+    if retrieval_k is None:
+        retrieval_k = config.top_k
     matches = retrieve_relevant_chunks(
-        question, collection, model, config.top_k, filters=filters
+        question, collection, model, retrieval_k, filters=filters
     )
     if not matches:
         if filters:
@@ -2038,6 +2083,7 @@ def process_user_question(
             "sources": [],
             "is_error": False,
         }
+    matches = rerank_retrieved_chunks(question, matches, config)
 
     # Identify missing comparison values without ever broadening to unrelated records.
     unmatched_filters = find_unmatched_filter_values(collection, filters or {}) if filters else {}
@@ -2822,6 +2868,7 @@ def _get_parent_orchestration_graph(_collection: Any, _config: AppConfig) -> Any
         rag_graph_builder=partial(
             build_rag_graph,
             retrieval_runner=retrieve_relevant_chunks,
+            rerank_runner=partial(rerank_retrieved_chunks, config=_config),
             client_provider=lambda: get_openai_client(_config),
             answer_runner=answer_with_rag,
         ),
@@ -2857,7 +2904,10 @@ def main() -> None:
         st.header("Research engine")
         st.caption(f"Embedding model: {config.embedding_model}")
         st.caption(f"Chunk size / overlap: {config.chunk_size} / {config.chunk_overlap}")
-        st.caption(f"Retrieved excerpts per question: {config.top_k}")
+        st.caption(
+            f"Final context excerpts: {config.rag_final_k or config.top_k} "
+            f"(from {config.rag_retrieval_k or config.top_k} retrieved candidates)"
+        )
 
     try:
         collection = load_chroma_collection(str(config.chroma_db_path.resolve()))
