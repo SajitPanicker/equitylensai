@@ -40,6 +40,7 @@ REPORT_FIELDS = (
     "retrieval_mode",
     "answer",
     "ground_truth",
+    "reference_sources",
     "retrieved_contexts",
     "retrieved_documents",
     "sources",
@@ -109,6 +110,20 @@ def scoreable_records(records: Iterable[dict[str, Any]]) -> list[dict[str, Any]]
     """Return only manually verified records eligible for Ragas scoring."""
 
     return [record for record in records if record.get("verification_status") == VERIFIED_STATUS]
+
+
+def evaluation_records(
+    records: Iterable[dict[str, Any]], *, include_pending: bool = False
+) -> list[dict[str, Any]]:
+    """Select records before retrieval, optionally including unscored pending records."""
+
+    if include_pending:
+        return [
+            record
+            for record in records
+            if record.get("verification_status") in {VERIFIED_STATUS, PENDING_STATUS}
+        ]
+    return scoreable_records(records)
 
 
 def _record_filters(record: dict[str, Any]) -> dict[str, str]:
@@ -200,7 +215,9 @@ def run_pipeline_case(
         "sources": deepcopy(state.get("sources") or []),
         "source_metadata_complete": _source_metadata_complete(documents),
         "scoring_status": (
-            "eligible" if record.get("verification_status") == VERIFIED_STATUS else PENDING_STATUS
+            "eligible"
+            if record.get("verification_status") == VERIFIED_STATUS
+            else "retrieval_only"
         ),
         "evaluation_error": None,
     }
@@ -217,11 +234,12 @@ def run_benchmark(
     client_provider: Callable[[], Any],
     answer_runner: Callable[..., str],
     history_provider: Callable[[str], list[dict[str, str]]] | None = None,
+    include_pending: bool = False,
 ) -> list[dict[str, Any]]:
     """Run the same benchmark records with either baseline or enhanced retrieval."""
 
     results = []
-    for record in records:
+    for record in evaluation_records(records, include_pending=include_pending):
         try:
             results.append(
                 run_pipeline_case(
@@ -246,7 +264,11 @@ def run_benchmark(
                     "retrieved_documents": [],
                     "sources": [],
                     "source_metadata_complete": False,
-                    "scoring_status": "pipeline_error",
+                    "scoring_status": (
+                        "pipeline_error"
+                        if record.get("verification_status") == VERIFIED_STATUS
+                        else "retrieval_only"
+                    ),
                     "evaluation_error": f"{type(error).__name__}: {error}",
                 }
             )
@@ -257,11 +279,11 @@ def build_ragas_metrics(llm: Any, embeddings: Any) -> list[Any]:
     """Build the four Ragas 0.4.0 metrics used by this evaluation."""
 
     metric_classes = _load_ragas_components()[2]
-    Faithfulness, ResponseRelevancy, LLMContextPrecisionWithoutReference, LLMContextRecall = metric_classes
+    Faithfulness, ResponseRelevancy, LLMContextPrecisionWithReference, LLMContextRecall = metric_classes
     return [
         Faithfulness(llm=llm),
         ResponseRelevancy(llm=llm, embeddings=embeddings),
-        LLMContextPrecisionWithoutReference(llm=llm),
+        LLMContextPrecisionWithReference(llm=llm),
         LLMContextRecall(llm=llm),
     ]
 
@@ -272,14 +294,14 @@ def _load_ragas_components() -> tuple[Any, Any, tuple[Any, Any, Any, Any], Any]:
     from ragas import EvaluationDataset, SingleTurnSample, evaluate
     from ragas.metrics import (
         Faithfulness,
-        LLMContextPrecisionWithoutReference,
+        LLMContextPrecisionWithReference,
         LLMContextRecall,
         ResponseRelevancy,
     )
     return (
         EvaluationDataset,
         SingleTurnSample,
-        (Faithfulness, ResponseRelevancy, LLMContextPrecisionWithoutReference, LLMContextRecall),
+        (Faithfulness, ResponseRelevancy, LLMContextPrecisionWithReference, LLMContextRecall),
         evaluate,
     )
 
@@ -329,7 +351,7 @@ def score_with_ragas(
             "answer_relevancy": ("answer_relevancy",),
             "context_precision": (
                 "context_precision",
-                "llm_context_precision_without_reference",
+                "llm_context_precision_with_reference",
             ),
             "context_recall": ("context_recall",),
         }
@@ -379,6 +401,11 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run offline Equity Lens Ragas evaluation.")
     parser.add_argument("--benchmark", type=Path, default=Path("evaluation/benchmark_dataset.json"))
     parser.add_argument("--output", type=Path, default=Path("evaluation/results"))
+    parser.add_argument(
+        "--include-pending",
+        action="store_true",
+        help="Run retrieval and answer generation for pending records, without Ragas scoring.",
+    )
     return parser.parse_args()
 
 
@@ -411,11 +438,17 @@ def main() -> None:
         "client_provider": lambda: get_openai_client(config),
         "answer_runner": answer_with_rag,
     }
-    baseline = run_benchmark(**common, records=records, rerank_runner=None)
+    baseline = run_benchmark(
+        **common,
+        records=records,
+        rerank_runner=None,
+        include_pending=args.include_pending,
+    )
     enhanced = run_benchmark(
         **common,
         records=records,
         rerank_runner=partial(rerank_retrieved_chunks, config=config),
+        include_pending=args.include_pending,
     )
     from ragas.embeddings.base import embedding_factory
     from ragas.llms import llm_factory

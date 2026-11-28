@@ -8,7 +8,7 @@ only run explicitly.
 ## Dataset
 
 [`evaluation/benchmark_dataset.json`](../evaluation/benchmark_dataset.json)
-contains the initial 30-question benchmark. Each record includes the question,
+contains the initial 32-question benchmark. Each record includes the question,
 company, ticker, period, document type, verification status, ground truth, and
 official reference sources.
 
@@ -22,8 +22,19 @@ financial figures or ground-truth answers. Before a record can be scored:
 4. Change `verification_status` to `verified`.
 
 The loader rejects verified records with missing ground truth or reference
-sources. Pending records remain in pipeline reports but are excluded from Ragas
-scoring.
+sources. By default, only `verification_status="verified"` records are sent
+through retrieval, answer generation, and Ragas scoring. Pending records do not
+trigger those calls.
+
+Use `--include-pending` only for an explicit retrieval-only experiment:
+
+```powershell
+& .\.venv\Scripts\python.exe -m evaluation.ragas_evaluation --include-pending
+```
+
+Pending records included this way are marked `retrieval_only` in the reports.
+They are never eligible for Ragas scoring because they have no verified ground
+truth.
 
 ## Retrieval comparison
 
@@ -45,8 +56,8 @@ Ragas `0.4.0` is used with these metrics:
 - `Faithfulness`: whether the answer is supported by retrieved context.
 - `ResponseRelevancy` (reported as `answer_relevancy`): whether the answer
   addresses the question.
-- `LLMContextPrecisionWithoutReference`: whether useful contexts are ranked
-  earlier.
+- `LLMContextPrecisionWithReference`: whether useful contexts are ranked
+  earlier, using the verified reference answer.
 - `LLMContextRecall`: whether the retrieved context supports the verified
   reference answer.
 
@@ -56,6 +67,10 @@ document metadata, source URLs, page/slide locations, and `source_references`.
 Rows with incomplete source metadata are flagged for manual review.
 
 ## Running the evaluation
+
+Both JSON and CSV reports preserve each record's `reference_sources`, including
+official source URLs and page/slide references, as well as retrieved document
+metadata and source references.
 
 Install the pinned evaluator dependency and the existing project dependencies:
 

@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 from evaluation.ragas_evaluation import (
     BenchmarkValidationError,
     build_ragas_metrics,
+    evaluation_records,
     load_benchmark_dataset,
     run_benchmark,
     score_with_ragas,
@@ -27,7 +28,7 @@ def benchmark_record(**overrides):
         "fiscal_year": "FY2024",
         "quarter": None,
         "document_type": "annual_report",
-        "reference_sources": [{"source_url": "https://nse.test/report.pdf"}],
+        "reference_sources": [{"source_url": "https://nse.test/report.pdf", "page": 12}],
         "verification_status": "verified",
     }
     record.update(overrides)
@@ -100,6 +101,61 @@ class RagasEvaluationTests(unittest.TestCase):
         )
         reranker.assert_called_once()
 
+    def test_pending_records_are_excluded_before_retrieval_by_default(self):
+        pending = benchmark_record(
+            ground_truth=None, reference_sources=[], verification_status="pending_verification"
+        )
+        retrieval = Mock()
+        answer = Mock()
+
+        results = run_benchmark(
+            [pending],
+            collection=Mock(),
+            model=object(),
+            config=SimpleNamespace(top_k=3, rag_retrieval_k=3, rag_final_k=2),
+            retrieval_runner=retrieval,
+            rerank_runner=None,
+            client_provider=Mock(),
+            answer_runner=answer,
+        )
+
+        self.assertEqual(results, [])
+        retrieval.assert_not_called()
+        answer.assert_not_called()
+
+    def test_include_pending_runs_retrieval_only_without_ragas_scoring(self):
+        pending = benchmark_record(
+            ground_truth=None, reference_sources=[], verification_status="pending_verification"
+        )
+        retrieval = Mock(return_value=[document()])
+        answer = Mock(return_value="Unverified answer.")
+
+        results = run_benchmark(
+            [pending],
+            collection=Mock(),
+            model=object(),
+            config=SimpleNamespace(top_k=3, rag_retrieval_k=3, rag_final_k=2),
+            retrieval_runner=retrieval,
+            rerank_runner=None,
+            client_provider=Mock(return_value=object()),
+            answer_runner=answer,
+            include_pending=True,
+        )
+
+        self.assertEqual(results[0]["scoring_status"], "retrieval_only")
+        with patch("evaluation.ragas_evaluation._load_ragas_components") as load_components:
+            scored = score_with_ragas(results, llm=object(), embeddings=object())
+        load_components.assert_not_called()
+        self.assertIsNone(scored[0]["context_precision"])
+
+    def test_evaluation_record_selection_keeps_verified_and_optionally_pending(self):
+        verified = benchmark_record()
+        pending = benchmark_record(
+            ground_truth=None, reference_sources=[], verification_status="pending_verification"
+        )
+        self.assertEqual(evaluation_records([verified, pending]), [verified])
+        self.assertEqual(evaluation_records([verified, pending], include_pending=True), [verified, pending])
+
     def test_missing_retrieved_context_is_not_sent_to_ragas(self):
         result = {
             **benchmark_record(),
@@ -127,6 +183,16 @@ class RagasEvaluationTests(unittest.TestCase):
         metric_classes[1].assert_called_once_with(llm="llm", embeddings="embeddings")
         metric_classes[2].assert_called_once_with(llm="llm")
         metric_classes[3].assert_called_once_with(llm="llm")
+
+    def test_context_precision_uses_reference_metric(self):
+        metric_classes = tuple(Mock() for _ in range(4))
+        with patch(
+            "evaluation.ragas_evaluation._load_ragas_components",
+            return_value=(object(), object(), metric_classes, Mock()),
+        ):
+            build_ragas_metrics("llm", "embeddings")
+
+        metric_classes[2].assert_called_once_with(llm="llm")
 
     def test_ragas_api_failure_is_recorded_without_aborting(self):
         result = {
@@ -172,7 +238,7 @@ class RagasEvaluationTests(unittest.TestCase):
                     {
                         "faithfulness": 0.9,
                         "answer_relevancy": 0.8,
-                        "llm_context_precision_without_reference": 0.7,
+                        "llm_context_precision_with_reference": 0.7,
                         "context_recall": 0.6,
                     }
                 ]
@@ -186,8 +252,12 @@ class RagasEvaluationTests(unittest.TestCase):
             scored = score_with_ragas([result], llm="llm", embeddings="embeddings")
 
         self.assertEqual(scored[0]["faithfulness"], 0.9)
+        self.assertEqual(scored[0]["context_precision"], 0.7)
         self.assertEqual(scored[0]["context_recall"], 0.6)
         evaluate.assert_called_once()
+
+        sample = evaluate.call_args.args[0].samples[0]
+        self.assertEqual(sample.values["reference"], "Revenue grew in the verified filing.")
 
     def test_evaluation_results_are_serialized_to_json_and_csv(self):
         result = {
@@ -215,6 +285,8 @@ class RagasEvaluationTests(unittest.TestCase):
 
         self.assertEqual(len(paths["enhanced"]), 2)
         self.assertEqual(json_output[0]["retrieved_documents"][0]["metadata"]["location"], "page 12")
+        self.assertEqual(json_output[0]["reference_sources"][0]["page"], 12)
+        self.assertIn("reference_sources", csv_output)
         self.assertIn("https://nse.test/report.pdf", csv_output)
 
 
