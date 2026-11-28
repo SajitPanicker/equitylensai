@@ -21,6 +21,10 @@ langchain-text-splitters
 langgraph
 langgraph-checkpoint-sqlite
 
+# Offline RAG evaluation; evaluated by evaluation/ragas_evaluation.py only.
+ragas==0.4.0
+langchain-community==0.3.31
+
 # Parent orchestration and subgraphs.
 langgraph
 
