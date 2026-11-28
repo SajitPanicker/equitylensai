@@ -253,5 +253,74 @@ class CohereRerankerTests(unittest.TestCase):
         self.assertEqual(result["sources"][0]["source_url"], "https://nse.test/3")
 
 
+class RagGraphRerankFallbackTests(unittest.TestCase):
+    def setUp(self):
+        self.documents = [
+            make_document("First result.", "ONE", "https://nse.test/1"),
+            make_document("Second result.", "TWO", "https://nse.test/2"),
+            make_document("Third result.", "THREE", "https://nse.test/3"),
+        ]
+
+    def build_graph(self, rerank_runner, documents=None, final_k=2):
+        return build_rag_graph(
+            collection=Mock(),
+            model=object(),
+            config=SimpleNamespace(top_k=5, rag_final_k=final_k),
+            retrieval_runner=Mock(return_value=self.documents if documents is None else documents),
+            rerank_runner=rerank_runner,
+            client_provider=Mock(return_value=object()),
+            answer_runner=Mock(return_value="unused"),
+            defer_answer=True,
+        )
+
+    def test_available_reranker_successfully_reorders_and_limits_results(self):
+        state = self.build_graph(Mock(return_value=[self.documents[2], self.documents[0], self.documents[1]])).invoke(
+            {"question": "Question"}
+        )
+
+        self.assertEqual(state["document_evidence"], [self.documents[2], self.documents[0]])
+        self.assertEqual(state["sources"][0]["source_url"], "https://nse.test/3")
+        self.assertEqual(state["document_evidence"][0]["metadata"]["source_references"][0]["source_url"], "https://nse.test/3")
+
+    def test_unavailable_reranker_limits_chroma_results_in_similarity_order(self):
+        state = self.build_graph(None).invoke({"question": "Question"})
+
+        self.assertEqual(state["document_evidence"], self.documents[:2])
+
+    def test_reranker_exception_falls_back_to_chroma_results(self):
+        state = self.build_graph(Mock(side_effect=RuntimeError("failed"))).invoke(
+            {"question": "Question"}
+        )
+
+        self.assertEqual(state["document_evidence"], self.documents[:2])
+
+    def test_empty_reranker_result_falls_back_to_chroma_results(self):
+        state = self.build_graph(Mock(return_value=[])).invoke({"question": "Question"})
+
+        self.assertEqual(state["document_evidence"], self.documents[:2])
+
+    def test_invalid_reranker_result_falls_back_to_chroma_results(self):
+        state = self.build_graph(Mock(return_value=[{"text": "not retrieved", "metadata": {}}])).invoke(
+            {"question": "Question"}
+        )
+
+        self.assertEqual(state["document_evidence"], self.documents[:2])
+
+    def test_fewer_retrieved_documents_than_final_k_are_preserved(self):
+        documents = self.documents[:1]
+        state = self.build_graph(None, documents=documents, final_k=4).invoke(
+            {"question": "Question"}
+        )
+
+        self.assertEqual(state["document_evidence"], documents)
+
+    def test_no_retrieved_documents_remains_empty(self):
+        reranker = Mock(return_value=self.documents)
+        state = self.build_graph(reranker, documents=[]).invoke({"question": "Question"})
+
+        self.assertEqual(state["document_evidence"], [])
+        reranker.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

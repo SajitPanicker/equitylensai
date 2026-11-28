@@ -109,21 +109,37 @@ def build_rag_graph(
                 "error_message": f"{type(error).__name__}: {error}",
                 "is_error": True,
             }
+        final_k = getattr(config, "rag_final_k", None)
+        if final_k is None:
+            final_k = config.top_k
+        fallback_matches = matches[:final_k]
         if matches and rerank_runner is not None:
-            final_k = getattr(config, "rag_final_k", None)
-            if final_k is None:
-                final_k = config.top_k
             try:
                 reranked_matches = rerank_runner(question, matches)
-                if reranked_matches:
-                    matches = reranked_matches
+                valid_reranked_matches = (
+                    isinstance(reranked_matches, list)
+                    and bool(reranked_matches)
+                    and all(
+                        isinstance(match, dict)
+                        and isinstance(match.get("text"), str)
+                        and bool(match.get("text"))
+                        and isinstance(match.get("metadata"), dict)
+                        and any(
+                            match is candidate or match == candidate
+                            for candidate in matches
+                        )
+                        for match in reranked_matches
+                    )
+                )
+                if valid_reranked_matches:
+                    matches = reranked_matches[:final_k]
                 else:
                     logger.warning(
-                        "Reranking returned no documents; retaining the first %d "
+                        "Reranking returned invalid or no documents; retaining the first %d "
                         "ChromaDB similarity-ranked result(s)",
                         final_k,
                     )
-                    matches = matches[:final_k]
+                    matches = fallback_matches
             except Exception as error:
                 logger.warning(
                     "Reranking failed (%s); retaining the first %d ChromaDB "
@@ -131,7 +147,9 @@ def build_rag_graph(
                     type(error).__name__,
                     final_k,
                 )
-                matches = matches[:final_k]
+                matches = fallback_matches
+        else:
+            matches = fallback_matches
         if not matches:
             requested_scope = ", ".join(
                 f"{field.replace('_', ' ')}: {', '.join(value) if isinstance(value, list) else value}"
